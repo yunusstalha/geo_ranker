@@ -91,7 +91,7 @@ def build_pointwise_llava(mode='basic'):
             {"type": "text", "text": "Evaluate if the satellite image corresponds to the location shown in the ground-level panorama."},
             {"type": "text", "text": "First, provide a brief step-by-step reasoning comparing key visual features (e.g., road layout, building shapes, landmarks)."},
             {"type": "text", "text": "Then, provide a confidence score between 0 (no match) and 100 (perfect match)."},
-            {"type": "text", "text": "Respond ONLY with a JSON object containing the reasoning and score, like this: {\"reasoning\": \"<your_reasoning>\", \"score\": <score_value>}"}
+            {"type": "text", "text": "Respond ONLY with a JSON object containing the reasoning and score (only the value), like this: {\"reasoning\": \"<your_reasoning>\", \"score\": <score_value>}"}
         ]
     else:
         raise ValueError(f"Unknown pointwise mode: {mode}")

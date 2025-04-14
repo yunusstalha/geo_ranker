@@ -41,26 +41,48 @@ class LlavaVLM(BaseVLM):
             )
 
         dtype = torch.bfloat16 if self.use_bf16 else torch.float16
+        effective_device_map = self.device
+        model_dtype_arg = dtype
+
+        # Handle CPU case explicitly
         if self.device == "cpu":
-            dtype = torch.float32
-            print("Warning: Running on CPU, using float32. Performance will be slow.")
+            model_dtype_arg = torch.float32
+            effective_device_map = "cpu" # Explicitly set device_map for CPU
+            print("Warning: Running on CPU, forcing float32. Performance will be slow.")
+            if self.use_quantization:
+                print("Warning: Quantization requested but running on CPU. Disabling quantization.")
+                self.use_quantization = False
+                quantization_config = None
+
+        # Adjust parameters if quantization is enabled
+        if self.use_quantization:
+             effective_device_map = "auto"
+             model_dtype_arg = None # Let BnB handle dtype
+             print(f"Using quantization. Setting device_map='{effective_device_map}' and model_dtype_arg=None.")
 
         try:
             self.processor = AutoProcessor.from_pretrained(self.model_name)
             self.model = LlavaForConditionalGeneration.from_pretrained(
                 self.model_name,
-                device_map=self.device if not self.use_quantization else "auto",
-                torch_dtype=dtype if not self.use_quantization else None,
+                device_map=effective_device_map,
+                torch_dtype=model_dtype_arg,
                 quantization_config=quantization_config,
-                low_cpu_mem_usage=True if self.use_quantization else False # Helps with large models + quantization
+                # *** FIX: Set low_cpu_mem_usage=True whenever device_map is used ***
+                # (It's generally safe and required when device_map is not None/implicitly CPU)
+                low_cpu_mem_usage=True
             )
             self.model.eval()
 
-             # If device_map wasn't used (e.g., CPU), manually set device
-            if self.device != "auto" and not self.model.hf_device_map:
+            # This manual move is likely redundant if device_map is used,
+            # but harmless if model is already on the target device.
+            # Useful primarily if device_map was None (e.g., explicit CPU loading failed earlier)
+            # or if fine-tuning requires manual placement.
+            if self.device != "auto" and not getattr(self.model, 'hf_device_map', None):
+                 print(f"Manually moving model to {self.device} as device_map info is not available.")
                  self.model.to(self.device)
 
-            print(f"Model loaded to device(s): {self.model.hf_device_map if hasattr(self.model, 'hf_device_map') else self.model.device}")
+            print(f"Model loaded. Device map: {getattr(self.model, 'hf_device_map', 'N/A')}. Effective device: {self.model.device}")
+
 
         except Exception as e:
             print(f"Error loading LLaVA model {self.model_name}: {e}")
@@ -68,7 +90,6 @@ class LlavaVLM(BaseVLM):
 
         end_time = time.time()
         print(f"Model loading took {end_time - start_time:.2f} seconds.")
-
     def _build_llava_prompt(self, conversation: list) -> str:
         """
         Constructs the prompt string specifically for LLaVA 1.5 format
@@ -147,3 +168,14 @@ class LlavaVLM(BaseVLM):
         )[0]
 
         return output_text.strip()
+
+    def move_inputs_to_device(self, inputs):
+        """
+        Move inputs to the correct device.
+        """
+        if self.device == "auto":
+            return inputs
+        for key in inputs:
+            if isinstance(inputs[key], torch.Tensor):
+                inputs[key] = inputs[key].to(self.device)
+        return inputs
