@@ -14,23 +14,49 @@ You could also add parallel LLaVA-specific prompt builders if needed.
 """
 
 
-def build_pointwise_qwen(mode = 'basic'):
-        if mode == 'basic':
-            conversation = [
+def build_pointwise_qwen(mode='basic'):
+    """
+    Builds a pointwise prompt for Qwen-VL.
+    Assumes 2 images: image[0] is query, image[1] is candidate.
+    """
+    if mode == 'basic':
+        conversation = [
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Given this panorama street view query:"},
-                    {"type": "image"},  
-                    {"type": "text", "text": "And the satellite image:"},
-                    {"type": "image"},
-                    {"type": "text", "text": "Predict a matching score between 0 (worst) and 100 (best). Is this panorama street view taken from the same location as the satellite image?"},   
-                    {"type": "text", "text": "Return your result in JSON format. Example: {\"score\": 85}"},
-                    {"type": "text", "text": "Return only the JSON result, without any additional text."}
-                    ]
-                }
-            ]
-            return conversation
+                    {"type": "text", "text": "Here is the ground-level panorama query image:"},
+                    {"type": "image"}, # Placeholder for query image (index 0)
+                    {"type": "text", "text": "Here is a candidate satellite image:"},
+                    {"type": "image"}, # Placeholder for candidate image (index 1)
+                    {"type": "text", "text": "Evaluate if the satellite image corresponds to the location shown in the ground-level panorama."},
+                    {"type": "text", "text": "Provide a confidence score between 0 (no match) and 100 (perfect match)."},
+                    {"type": "text", "text": "Respond ONLY with a JSON object containing the score, like this: {\"score\": <score_value>}"}
+                ]
+            }
+            # Qwen expects an empty assistant message to signal generation turn,
+            # but apply_chat_template with add_generation_prompt=True handles this.
+        ]
+        return conversation
+    elif mode == 'reasoning':
+         conversation = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Here is the ground-level panorama query image:"},
+                    {"type": "image"}, # Placeholder for query image (index 0)
+                    {"type": "text", "text": "Here is a candidate satellite image:"},
+                    {"type": "image"}, # Placeholder for candidate image (index 1)
+                    {"type": "text", "text": "Evaluate if the satellite image corresponds to the location shown in the ground-level panorama."},
+                    {"type": "text", "text": "First, provide a brief step-by-step reasoning comparing key visual features (e.g., road layout, building shapes, landmarks)."},
+                    {"type": "text", "text": "Then, provide a confidence score between 0 (no match) and 100 (perfect match)."},
+                    {"type": "text", "text": "Respond ONLY with a JSON object containing the reasoning and score, like this: {\"reasoning\": \"<your_reasoning>\", \"score\": <score_value>}"}
+                ]
+            }
+        ]
+         return conversation
+    else:
+        raise ValueError(f"Unknown pointwise mode: {mode}")
+
 
 def build_pairwise_qwen():
     pass
@@ -38,3 +64,44 @@ def build_pairwise_qwen():
 
 def build_listwise_qwen():
     pass
+
+def build_pointwise_llava(mode='basic'):
+    """
+    Builds a pointwise prompt conversation structure for Llava-1.5.
+    Assumes 2 images: image[0] is query, image[1] is candidate.
+    The LlavaVLM class will format this into the final prompt string.
+    """
+    content = []
+    if mode == 'basic':
+        content = [
+            {"type": "text", "text": "Here is the ground-level panorama query image:"},
+            {"type": "image"}, # Placeholder for query image (index 0)
+            {"type": "text", "text": "Here is a candidate satellite image:"},
+            {"type": "image"}, # Placeholder for candidate image (index 1)
+            {"type": "text", "text": "Evaluate if the satellite image corresponds to the location shown in the ground-level panorama."},
+            {"type": "text", "text": "Provide a confidence score between 0 (no match) and 100 (perfect match)."},
+            {"type": "text", "text": "Respond ONLY with a JSON object containing the score, like this: {\"score\": <score_value>}"}
+        ]
+    elif mode == 'reasoning':
+        content = [
+            {"type": "text", "text": "Here is the ground-level panorama query image:"},
+            {"type": "image"}, # Placeholder for query image (index 0)
+            {"type": "text", "text": "Here is a candidate satellite image:"},
+            {"type": "image"}, # Placeholder for candidate image (index 1)
+            {"type": "text", "text": "Evaluate if the satellite image corresponds to the location shown in the ground-level panorama."},
+            {"type": "text", "text": "First, provide a brief step-by-step reasoning comparing key visual features (e.g., road layout, building shapes, landmarks)."},
+            {"type": "text", "text": "Then, provide a confidence score between 0 (no match) and 100 (perfect match)."},
+            {"type": "text", "text": "Respond ONLY with a JSON object containing the reasoning and score, like this: {\"reasoning\": \"<your_reasoning>\", \"score\": <score_value>}"}
+        ]
+    else:
+        raise ValueError(f"Unknown pointwise mode: {mode}")
+
+    # Structure for LLaVA: a single user turn with text and image markers
+    conversation = [
+        {
+            "role": "user",
+            "content": content
+        }
+        # The LlavaVLM prompt builder adds "ASSISTANT:" turn
+    ]
+    return conversation # Return the list structure
