@@ -1,0 +1,19 @@
+name: geo_ranker
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pytorch
+  - torchvision
+  - torchaudio
+  - requests
+  - pillow
+  - pip
+  - matplotlib
+  - pip:
+      - transformers==4.49.0
+      - peft
+      - bitsandbytes
+      - qwen-vl-utils[decord]
