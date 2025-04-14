@@ -30,40 +30,40 @@ class LlavaHandler(BaseVLMHandler):
             logger.error(f"Failed to load LLaVA model {self.model_id}: {e}")
             raise
 
-    def format_prompt(self, text_parts: List[str], images: List[Image.Image]) -> str:
-        """
-        Formats the prompt for LLaVA. LLaVA typically uses a simpler structure
-        often involving USER:/ASSISTANT: and specific image tokens like <image>.
-        The processor usually handles image token insertion.
-        """
-        if not self.processor:
-            raise RuntimeError("Processor not loaded.")
+    # def format_prompt(self, text_parts: List[str], images: List[Image.Image]) -> str:
+    #     """
+    #     Formats the prompt for LLaVA. LLaVA typically uses a simpler structure
+    #     often involving USER:/ASSISTANT: and specific image tokens like <image>.
+    #     The processor usually handles image token insertion.
+    #     """
+    #     if not self.processor:
+    #         raise RuntimeError("Processor not loaded.")
 
-        # LLaVA structure often looks like: "USER: <image>\n<text>\nASSISTANT:"
-        # The processor inserts the image features where <image> token appears in text
-        prompt_text = ""
-        img_count = 0
-        for part in text_parts:
-            if part == "<image>":
-                 prompt_text += self.processor.tokenizer.decode(self.processor.tokenizer.convert_tokens_to_ids(['<image>'])[0]) # Use actual image token
-                 img_count += 1
-            else:
-                prompt_text += part
+    #     # LLaVA structure often looks like: "USER: <image>\n<text>\nASSISTANT:"
+    #     # The processor inserts the image features where <image> token appears in text
+    #     prompt_text = ""
+    #     img_count = 0
+    #     for part in text_parts:
+    #         if part == "<image>":
+    #              prompt_text += self.processor.tokenizer.decode(self.processor.tokenizer.convert_tokens_to_ids(['<image>'])[0]) # Use actual image token
+    #              img_count += 1
+    #         else:
+    #             prompt_text += part
 
-        # Add standard LLaVA turn structure if not already included in text_parts
-        if not prompt_text.strip().startswith("USER:") and not prompt_text.strip().endswith("ASSISTANT:"):
-             prompt_text = f"USER: {prompt_text}\nASSISTANT:"
-        elif not prompt_text.strip().endswith("ASSISTANT:"):
-             prompt_text += "\nASSISTANT:"
+    #     # Add standard LLaVA turn structure if not already included in text_parts
+    #     if not prompt_text.strip().startswith("USER:") and not prompt_text.strip().endswith("ASSISTANT:"):
+    #          prompt_text = f"USER: {prompt_text}\nASSISTANT:"
+    #     elif not prompt_text.strip().endswith("ASSISTANT:"):
+    #          prompt_text += "\nASSISTANT:"
 
 
-        if img_count != len(images):
-             logger.warning(f"Number of images ({len(images)}) does not match <image> placeholders ({img_count}) in prompt parts.")
+    #     if img_count != len(images):
+    #          logger.warning(f"Number of images ({len(images)}) does not match <image> placeholders ({img_count}) in prompt parts.")
 
-        # Unlike Qwen's apply_chat_template, for Llava we often pass the images
-        # alongside the text prompt directly to the processor during the call.
-        # So here we just return the text part of the prompt.
-        return prompt_text.strip() # Return the text prompt string
+    #     # Unlike Qwen's apply_chat_template, for Llava we often pass the images
+    #     # alongside the text prompt directly to the processor during the call.
+    #     # So here we just return the text part of the prompt.
+    #     return prompt_text.strip() # Return the text prompt string
 
     def generate_response(self, prompt: str, images: List[Image.Image], generation_args: Dict | None = None) -> str:
         """Generates a response from the LLaVA VLM."""

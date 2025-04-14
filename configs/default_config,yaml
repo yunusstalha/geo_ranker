@@ -1,50 +1,6 @@
-# configs/default_config.yaml
 
-# Experiment settings
-experiment_name: "vigor_qwen_pointwise_zeroshot"
-output_dir: "./outputs" # Directory to save results/logs
-
-# --- Model Configuration ---
+test_key: value
 model:
-  name: "qwen" # 'qwen' or 'llava'
-  model_id: "Qwen/Qwen2.5-VL-7B-Instruct" # Specific model checkpoint
-  # model_id: "llava-hf/llava-1.5-7b-hf" # Example for LLaVA
-  device: "auto" # "cuda", "cpu", or "auto"
-  torch_dtype: "bfloat16" # "bfloat16", "float16", "float32"
+  name: test_model
   quantization:
-    enabled: true
-    mode: "int4_weight_only" # Or "int8", etc. Match TorchAoConfig or bitsandbytes options
-    group_size: 128 # For TorchAoConfig
-
-# --- Data Configuration (Placeholders) ---
-data:
-  dataset_name: "VIGOR" # VIGOR, CVUSA, CVACT
-  base_path: "/path/to/your/datasets" # Root directory for datasets
-  retrieval_results_path: "/path/to/retrieval/results/top20.pkl" # Example path to pre-computed top-k results
-  # Specific paths might be derived from base_path and dataset_name later
-
-# --- Reranking Configuration ---
-reranking:
-  strategy: "pointwise" # "pointwise", "pairwise", "listwise"
-  top_k_retrieval: 20   # Number of candidates from the initial retrieval stage
-  prompt_type: "score" # "basic", "reasoning", "score" (Controls prompt template used)
-
-  # Pointwise specific options
-  pointwise:
-    scoring_method: "likelihood" # Or "direct_score_prediction" if using 'score' prompt
-
-  # Pairwise specific options
-  pairwise:
-    aggregation: "counting" # "counting", "tournament_sort"
-
-  # Listwise specific options
-  listwise:
-    window_size: null # null means process all top_k_retrieval at once. Set number for sliding window.
-
-# --- Evaluation Configuration ---
-evaluation:
-  metrics: ["Recall@1", "Recall@5", "Recall@10"]
-
-# --- Logging ---
-logging:
-  level: "INFO" # DEBUG, INFO, WARNING, ERROR, CRITICAL
+    enabled: false

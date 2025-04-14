@@ -81,29 +81,21 @@ class BaseVLMHandler(ABC):
         """Loads the specific VLM model and processor."""
         pass
 
-    @abstractmethod
-    def format_prompt(self, text_parts: List[str], images: List[Image.Image]) -> str:
-        """
-        Formats the text parts and image placeholders into a single prompt string
-        suitable for the specific VLM's chat template.
-
-        Args:
-            text_parts (List[str]): List of text segments for the prompt.
-            images (List[Image.Image]): List of images corresponding to placeholders in the prompt.
-
-        Returns:
-            str: The fully formatted prompt string.
-        """
-        pass
 
     @abstractmethod
-    def generate_response(self, prompt: str, images: List[Image.Image], generation_args: Dict | None = None) -> str:
+    def generate_response(self,
+                          prompt_structure: List[Dict[str, Any]],
+                          images: List[Image.Image],
+                          generation_args: Dict | None = None
+                         ) -> str:
         """
-        Generates a response from the VLM given a prompt and images.
+        Generates a response from the VLM given a structured prompt and images.
 
         Args:
-            prompt (str): The formatted prompt string.
-            images (List[Image.Image]): The list of images to be processed.
+            prompt_structure (List[Dict[str, Any]]): The structured prompt representation
+                (e.g., [{'type': 'text', 'content': '...'}, {'type': 'image', 'index': 0}]).
+            images (List[Image.Image]): The list of images, indexed according to 'index'
+                                       in the prompt_structure.
             generation_args (Dict | None): Optional arguments for the model's generate method
                                            (e.g., max_new_tokens, temperature).
 
@@ -112,36 +104,41 @@ class BaseVLMHandler(ABC):
         """
         pass
 
-    def get_likelihood(self, prompt: str, images: List[Image.Image], target_texts: List[str]) -> List[float]:
+
+    def get_likelihood(self,
+                       prompt_structure: List[Dict[str, Any]],
+                       images: List[Image.Image],
+                       target_texts: List[str]
+                      ) -> List[float]:
         """
-        Calculates the likelihood (e.g., negative log probability) of generating
-        specific target texts given the prompt and images.
-        (This is more complex and might require accessing logits - basic implementation provided,
-        but may need model-specific refinement).
+        Calculates the likelihood of generating specific target texts.
+        (Placeholder - requires significant model-specific implementation).
 
         Args:
-            prompt (str): The formatted prompt string.
-            images (List[Image.Image]): The list of images.
-            target_texts (List[str]): The candidate texts whose likelihoods are to be calculated.
+            prompt_structure: The structured prompt representation.
+            images: The list of images.
+            target_texts: The candidate texts whose likelihoods are to be calculated.
 
         Returns:
-            List[float]: A list of scores (e.g., negative log-likelihoods) for each target text.
-                         Lower scores usually indicate higher likelihood.
+            List[float]: A list of scores (e.g., negative log-likelihoods).
         """
-        # NOTE: This is a simplified placeholder. Accurate likelihood calculation often
-        # requires accessing token logits and careful handling of tokenization.
-        # May need significant model-specific adaptation.
-        print("Warning: get_likelihood is a basic placeholder and may not be accurate.")
+        # This method now also needs to handle the prompt_structure to prepare inputs.
+        # The core difficulty of accurate likelihood calculation remains.
+        print("get_likelihood is a basic placeholder and may not be accurate or functional with structured prompts.")
+        # Placeholder: Attempt to prepare inputs similarly to how generate_response might
+        # This part is highly dependent on the specific model's processor
+        try:
+            # Attempt a generic preparation (likely needs override in subclass)
+             prepared_inputs = self._prepare_inputs_for_generation(prompt_structure, images)
+             inputs_list = [prepared_inputs] * len(target_texts) # Naive duplication for batching
 
-        inputs = self.processor(text=[prompt] * len(target_texts), images=images * len(target_texts), return_tensors="pt", padding=True).to(self.model.device)
-        target_tokens = self.processor(text=target_texts, return_tensors="pt", padding=True, add_special_tokens=False).input_ids.to(self.model.device)
+             # Replicate processor call from generate response if possible (might need text only)
+             # This is very difficult to generalize here. Subclasses MUST override.
+             # inputs = self.processor(text=[prompt_text_from_structure] * len(target_texts), images=images * len(target_texts), return_tensors="pt", padding=True).to(self.model.device)
 
-        outputs = self.model(**inputs, output_hidden_states=False, output_attentions=False)
-        logits = outputs.logits
+             print("get_likelihood needs model-specific implementation to prepare inputs from structure.")
+             return [-float(i) for i in range(len(target_texts))] # Return dummy scores
 
-        # Simplified score: Sum log probabilities of target tokens (needs careful alignment)
-        # This requires aligning input_ids+target_ids with logits correctly.
-        # A common simplification is to just use the generate function and hope the first token
-        # or a simple generated score reflects likelihood, which is often inaccurate.
-        # Returning dummy scores for now.
-        return [-float(i) for i in range(len(target_texts))] # Return dummy decreasing scores
+        except Exception as e:
+             print(f"Failed to prepare inputs for get_likelihood (needs override): {e}")
+             return [-float(i) for i in range(len(target_texts))]

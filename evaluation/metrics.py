@@ -1,6 +1,7 @@
 # src/evaluation/metrics.py
 import logging
-from typing import List, Any, Dict
+from typing import List, Any, Dict, Tuple
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -98,9 +99,9 @@ def parse_metric_config(metric_names: List[str]) -> Tuple[List[int], List[int]]:
         if match:
             acc_k_list.append(int(match.group(2)))
             continue
-        match = re.match(r"recall@(\d+)", name_lower)
+        match = re.match(r"recall@(\d+)", name_lower) # Group 1: number
         if match:
-            rec_k_list.append(int(match.group(2)))
+            rec_k_list.append(int(match.group(1))) # <--- CORRECT group index (use 1)
             continue
         logger.warning(f"Could not parse metric name: {name}. Skipping.")
 

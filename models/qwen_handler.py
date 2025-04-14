@@ -29,85 +29,112 @@ class QwenHandler(BaseVLMHandler):
             logger.error(f"Failed to load Qwen model {self.model_id}: {e}")
             raise
 
-    def format_prompt(self, text_parts: List[str], images: List[Image.Image]) -> str:
+    def _structure_to_qwen_conversation(self, prompt_structure: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Formats the prompt for Qwen using its chat template structure.
-        Assumes image placeholders correspond sequentially to the images list.
+        Converts the generic prompt structure to Qwen's expected chat format.
+        e.g., [{'role': 'user', 'content': [{'type':'text', 'text':'...'}, {'type':'image'}]}]
         """
-        if not self.processor:
-            raise RuntimeError("Processor not loaded.")
-
-        conversation = [{"role": "user", "content": []}]
-        img_idx = 0
-        for part in text_parts:
-            if part == "<image>":
-                if img_idx < len(images):
-                    # Qwen's template typically handles images implicitly when passed to processor
-                    # We add a placeholder text for image position in the conversation structure
-                    conversation[0]["content"].append({"type": "image"})
-                    img_idx += 1
-                else:
-                    logger.warning("More <image> placeholders than images provided.")
+        qwen_content = []
+        for part in prompt_structure:
+            part_type = part.get('type')
+            if part_type == 'text':
+                # Qwen expects 'text' key within content list
+                qwen_content.append({'type': 'text', 'text': part.get('content', '')})
+            elif part_type == 'image':
+                # Qwen expects just 'image' type; index mapping happens implicitly later
+                qwen_content.append({'type': 'image'})
             else:
-                conversation[0]["content"].append({"type": "text", "text": part})
-
-        # Check if all images were used
-        if img_idx != len(images):
-             logger.warning(f"Number of images ({len(images)}) does not match <image> placeholders ({img_idx}).")
-
-        try:
-            # Tokenize=False gets the formatted string including special tokens for images
-            prompt = self.processor.apply_chat_template(
-                conversation,
-                tokenize=False,
-                add_generation_prompt=True
-            )
-            return prompt
-        except Exception as e:
-            logger.error(f"Error applying chat template: {e}")
-            # Fallback or simplified formatting if template fails
-            simple_prompt = ""
-            for part in conversation[0]["content"]:
-                if part["type"] == "text":
-                    simple_prompt += part["text"] + "\n"
-                elif part["type"] == "image":
-                    simple_prompt += "<image placeholder>\n" # Indicate image position
-            logger.warning("Using simplified prompt formatting due to template error.")
-            return simple_prompt
+                logger.warning(f"Unsupported part type '{part_type}' in prompt structure for Qwen. Skipping.")
+        # Assuming a single user turn for now, adjust if multi-turn needed
+        return [{"role": "user", "content": qwen_content}]
 
 
-    def generate_response(self, prompt: str, images: List[Image.Image], generation_args: Dict | None = None) -> str:
-        """Generates a response from the Qwen VLM."""
+    def generate_response(self,
+                        prompt_structure: List[Dict[str, Any]],
+                        images: List[Image.Image],
+                        generation_args: Dict | None = None
+                        ) -> str:
+        """Generates a response from the Qwen VLM using structured input."""
         if not self.model or not self.processor:
+            # Add check here as well, in case loading failed silently
+            logger.error("Model or processor not loaded. Cannot generate response.")
             raise RuntimeError("Model or processor not loaded.")
 
+        logger.debug(f"Received prompt structure with {len(prompt_structure)} parts and {len(images)} images.")
+
+        # 1. Convert structure to Qwen's chat format
+        conversation = self._structure_to_qwen_conversation(prompt_structure)
+        logger.debug(f"Converted structure to Qwen conversation: {conversation}")
+
+        # 2. Apply chat template to get the final prompt string
+        try:
+            # Tokenize=False gets the formatted string including special tokens for images/roles
+            prompt_string = self.processor.apply_chat_template(
+                conversation,
+                tokenize=False,
+                add_generation_prompt=True # Important for generation
+            )
+            logger.debug(f"Formatted prompt string for processor: '{prompt_string[:200]}...'")
+        except Exception as e:
+            logger.error(f"Error applying Qwen chat template: {e}", exc_info=True)
+            # Fallback: Try to concatenate text parts? Very crude.
+            prompt_string = " ".join([p.get('content', '') for p in prompt_structure if p.get('type') == 'text'])
+            logger.warning("Using simplified fallback prompt string due to template error.")
+
+
+        # 3. Prepare model inputs using the processor
+        try:
+             # The processor takes the template string and the original image list.
+             # It maps the image placeholders in the template string to the images.
+             inputs = self.processor(
+                 text=[prompt_string], # Pass the templated string
+                 images=images,      # Pass the original list of images
+                 padding=True,
+                 return_tensors="pt"
+             ).to(self.model.device) # Ensure inputs are on the correct device
+             logger.debug("Processor created model inputs.")
+        except Exception as e:
+             logger.error(f"Error processing inputs with Qwen processor: {e}", exc_info=True)
+             raise # Cannot proceed without inputs
+
+
+        # 4. Run model generation (remains largely the same)
         default_args = {"max_new_tokens": 512, "do_sample": False} # Sensible defaults
         if generation_args:
             default_args.update(generation_args)
 
-        inputs = self.processor(
-            text=[prompt],
-            images=images,
-            padding=True,
-            return_tensors="pt"
-        ).to(self.model.device) # Ensure inputs are on the correct device
-
         logger.debug(f"Generating response with args: {default_args}")
-        with torch.no_grad():
-             # Use **inputs.to_dict() if error occurs
-            output_ids = self.model.generate(**inputs, **default_args)
+        output_ids = None # Initialize
+        try:
+            with torch.no_grad():
+                 output_ids = self.model.generate(**inputs, **default_args)
+            logger.debug("Model generation completed.")
+        except Exception as e:
+             logger.error(f"Error during Qwen model.generate: {e}", exc_info=True)
+             # Handle error, maybe return an error message or raise
+             return "[ERROR: Generation failed]"
 
-        # Remove input tokens from the generated output
-        input_token_len = inputs.input_ids.shape[1]
-        generated_ids = output_ids[:, input_token_len:]
+        if output_ids is None:
+             logger.error("Output IDs are None after generation call.")
+             return "[ERROR: Generation produced no output]"
 
-        response = self.processor.batch_decode(
-            generated_ids,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=True
-        )
-        logger.debug(f"Raw VLM Response: {response[0]}")
-        return response[0].strip()
+        # 5. Decode response (remains largely the same)
+        try:
+            input_token_len = inputs.input_ids.shape[1]
+            # Ensure slicing is correct even if output_ids is shorter than input (shouldn't happen with generate)
+            generated_ids = output_ids[:, input_token_len:] if output_ids.shape[1] > input_token_len else output_ids
+
+            response = self.processor.batch_decode(
+                generated_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=True
+            )
+            final_response = response[0].strip() if response else ""
+            logger.debug(f"Decoded VLM Response: {final_response}")
+            return final_response
+        except Exception as e:
+             logger.error(f"Error decoding Qwen response: {e}", exc_info=True)
+             return "[ERROR: Decoding failed]"
 
     # Potentially override get_likelihood here if a Qwen-specific method is found
     # e.g., using logits or specific API features if available.
