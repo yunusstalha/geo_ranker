@@ -69,7 +69,8 @@ class LlavaVLM(BaseVLM):
                 quantization_config=quantization_config,
                 # *** FIX: Set low_cpu_mem_usage=True whenever device_map is used ***
                 # (It's generally safe and required when device_map is not None/implicitly CPU)
-                low_cpu_mem_usage=True
+                low_cpu_mem_usage=True,
+                attn_implementation="flash_attention_2"
             )
             self.model.eval()
 

@@ -56,6 +56,7 @@ class QwenVLM(BaseVLM):
                 torch_dtype=dtype if not self.use_quantization else None, # dtype might conflict with quantization config
                 quantization_config=quantization_config,
                 trust_remote_code=True, # Important for models that require remote code execution
+                attn_implementation="flash_attention_2"
             )
             self.model.eval()
 
