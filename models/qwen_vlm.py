@@ -208,9 +208,7 @@ class QwenVLM(BaseVLM):
             gen_start_time = time.time()
             with torch.no_grad():
                  generate_ids = self.model.generate(
-                     input_ids=inputs['input_ids'],
-                     pixel_values=inputs['pixel_values'],
-                     attention_mask=inputs['attention_mask'],
+                        **inputs,
                      max_new_tokens=max_new_tokens,
                      do_sample=False,
                      pad_token_id=self.hf_processor.tokenizer.eos_token_id # Qwen often uses eos_token_id for padding
@@ -410,17 +408,14 @@ class QwenVLM(BaseVLM):
             # --- Attempt 1: Use model.generate ---
             print("Attempting logit retrieval via model.generate...")
             outputs = self.model.generate(
-                input_ids=inputs['input_ids'],
-                pixel_values=inputs['pixel_values'],
-                attention_mask=inputs['attention_mask'],
-                max_new_tokens=1,
+                **inputs,
+                max_new_tokens=5,
                 output_scores=True,
                 return_dict_in_generate=True,
                 do_sample=False,
-                num_beams=1, # Explicitly force greedy search
                 pad_token_id=tokenizer.eos_token_id
             )
-
+            print('Outputs from model.generate:', outputs)
             # Check if scores are valid
             if hasattr(outputs, 'scores') and outputs.scores is not None and len(outputs.scores) > 0:
                 if outputs.scores[0] is not None:
