@@ -5,6 +5,7 @@ from PIL import Image
 import torch
 import base64 # Needed for vLLM image prep
 import io       # Needed for vLLM image prep
+from typing import List, Dict, Union # Added typing
 
 class BaseVLM(ABC):
     """
@@ -18,7 +19,12 @@ class BaseVLM(ABC):
         """
         self.model_name = model_name
         self.device = device
-        self.hf_device = device # Store HF device preference
+
+        if device == "auto":
+            self.hf_device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            self.hf_device = device # Respect user choice ('cuda', 'cpu')
+
         self.inference_backend = inference_backend
         self.kwargs = kwargs # Store extra args like tensor_parallel_size
 
@@ -62,3 +68,22 @@ class BaseVLM(ABC):
         run inference and return the model's text output.
         """
         pass
+
+    @abstractmethod
+    def score_multiple_choice(self, conversation: Union[List, Dict], image_inputs: List[Image.Image], choices: List[str]) -> Dict[str, float]:
+        """
+        Scores a set of choices based on model's likelihood for the next token(s).
+        Returns a dictionary mapping each choice string to its probability.
+        Primarily intended for HF backend due to logit access requirements.
+        """
+        pass
+
+    def move_inputs_to_device(self, inputs):
+        """ Move inputs dictionary Tensors to the target device for HF. """
+        if self.inference_backend == 'hf' and self.hf_device != 'cpu':
+            target_device = torch.device(self.hf_device)
+            for key in inputs.keys():
+                if isinstance(inputs[key], torch.Tensor):
+                    inputs[key] = inputs[key].to(target_device)
+        # No move needed for CPU or if device is handled by 'auto' map or vLLM
+        return inputs

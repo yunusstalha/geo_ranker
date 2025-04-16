@@ -3,29 +3,34 @@
 import os
 from PIL import Image
 import torch
+import torch.nn.functional as F # Added for softmax
 
 from transformers import (
     Qwen2_5_VLForConditionalGeneration,
     AutoProcessor,
-    # TorchAoConfig
     BitsAndBytesConfig
 )
 from dataclasses import asdict
 try:
     from vllm import LLM, EngineArgs, SamplingParams
     VLLM_AVAILABLE = True
-    from qwen_vl_utils import process_vision_info
-    QWEN_UTILS_AVAILABLE = False
+    # from qwen_vl_utils import process_vision_info # Comment out if not used or causing issues
+    # QWEN_UTILS_AVAILABLE = True
+    QWEN_UTILS_AVAILABLE = False # Assume not used for now
 except ImportError:
     process_vision_info = None
     QWEN_UTILS_AVAILABLE = False
-    print("Optional: `qwen-vl-utils` not found. Image resizing specific to Qwen might not occur.")
+    LLM = None
+    SamplingParams = None
+    VLLM_AVAILABLE = False
+    print("Warning: vLLM or qwen_vl_utils not found. vLLM backend or specific Qwen utils will not be available.")
+
 
 from .base_vlm import BaseVLM
 import time
+from typing import List, Dict, Union # Added typing
 
-import base64
-import io
+import traceback # Import traceback for detailed error logging
 
 class QwenVLM(BaseVLM):
     # Update __init__ signature
@@ -42,8 +47,11 @@ class QwenVLM(BaseVLM):
         self.use_quantization = use_quantization
         self.tensor_parallel_size = tensor_parallel_size
         self.max_images_per_prompt = max_images_per_prompt
-        super().__init__(model_name=model_name, device=device, inference_backend=inference_backend)
-
+        # Pass potentially resolved device to super()
+        resolved_device = device
+        if device == "auto":
+            resolved_device = "cuda" if torch.cuda.is_available() else "cpu"
+        super().__init__(model_name=model_name, device=resolved_device, inference_backend=inference_backend)
 
     def _load_model(self):
         """ Load model based on the selected inference backend. """
@@ -52,20 +60,21 @@ class QwenVLM(BaseVLM):
         elif self.inference_backend == 'vllm':
             if not VLLM_AVAILABLE:
                 raise ImportError("vLLM backend selected, but vLLM library is not installed or failed to import.")
-            self._load_vllm_engine() # This might fail if Qwen-VL not supported
+            self._load_vllm_engine() # This might fail if Qwen-VL not supported well by vLLM
         else:
             raise ValueError(f"Unsupported inference_backend: {self.inference_backend}")
-   
+
     def _load_hf_model(self):
         """ Loads the HuggingFace Qwen model (existing logic). """
         print(f"Loading Qwen model for HF backend: {self.model_name}...")
         start_time = time.time()
         quantization_config_bnb = None
-        if self.use_quantization:
+        if self.use_quantization and self.hf_device != "cpu": # Quantization only on CUDA
             print("Applying 4-bit BitsAndBytes quantization for HF...")
             quantization_config_bnb = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=torch.bfloat16 if self.use_bf16 else torch.float16,
+                 # Qwen might need specific bnb settings, check model card if issues arise
             )
 
         dtype = torch.bfloat16 if self.use_bf16 else torch.float16
@@ -77,13 +86,15 @@ class QwenVLM(BaseVLM):
             effective_device_map = "cpu"
             print("Warning: Running HF on CPU, forcing float32.")
             if self.use_quantization:
-                self.use_quantization = False
+                print("Warning: Quantization requested but running on CPU. Disabling HF quantization.")
+                self.use_quantization = False # Ensure flag is off
                 quantization_config_bnb = None
 
-        if self.use_quantization:
-             effective_device_map = "auto"
-             model_dtype_arg = None
-             print(f"Using HF quantization. Setting device_map='{effective_device_map}' and model_dtype_arg=None.")
+        # If quantizing, device_map must be 'auto' for BNB usually
+        if self.use_quantization and quantization_config_bnb:
+            effective_device_map = "auto"
+            model_dtype_arg = None # dtype handled by quantization_config or implicitly
+            print(f"Using HF quantization. Setting device_map='{effective_device_map}' and model_dtype_arg=None.")
 
         try:
             self.hf_processor = AutoProcessor.from_pretrained(self.model_name, trust_remote_code=True)
@@ -95,9 +106,20 @@ class QwenVLM(BaseVLM):
                 trust_remote_code=True,
             )
             self.model.eval()
-            print(f"HF Model loaded. Device map: {getattr(self.model, 'hf_device_map', 'N/A')}. Effective device: {self.model.device}")
+             # Determine the actual device after loading
+            if hasattr(self.model, 'device'):
+                self.hf_device = str(self.model.device) # Update hf_device based on actual placement
+                print(f"HF Model loaded. Device map: {getattr(self.model, 'hf_device_map', 'N/A')}. Effective device: {self.hf_device}")
+            else:
+                 # Qwen model might store device differently or not have a top-level .device
+                 # We rely on the device_map argument primarily here.
+                 print(f"HF Model loaded. Device map used: {effective_device_map}. Cannot determine final device from model object.")
+
+
         except Exception as e:
             print(f"Error loading Qwen HF model {self.model_name}: {e}")
+            import traceback
+            traceback.print_exc()
             raise
         end_time = time.time()
         print(f"HF Model loading took {end_time - start_time:.2f} seconds.")
@@ -108,30 +130,30 @@ class QwenVLM(BaseVLM):
         print(f"Loading Qwen model for vLLM backend: {self.model_name}...")
         start_time = time.time()
 
-        print("Loading HF Processor for text processing...")
+        print("Loading HF Processor for text processing (needed for prompt building)...")
         try:
             self.hf_processor = AutoProcessor.from_pretrained(self.model_name, trust_remote_code=True)
         except Exception as e:
             print(f"Warning: Could not load HF Processor {self.model_name}: {e}")
-            self.hf_processor = None
+            self.hf_processor = None # Prompt building might fail
 
         vllm_quantization = None
         if self.use_quantization:
-            vllm_quantization = "awq"
+            vllm_quantization = "awq" # Check vLLM+Qwen docs for supported methods
             print(f"Applying vLLM quantization: {vllm_quantization}")
 
-        max_images_per_prompt = self.max_images_per_prompt
+        # Use self.max_images_per_prompt passed during init
         engine_args = EngineArgs(
             model=self.model_name,
             quantization=vllm_quantization,
             tensor_parallel_size=self.tensor_parallel_size,
-            trust_remote_code=True,
-            limit_mm_per_prompt={"image": max_images_per_prompt},
+            trust_remote_code=True, # Essential for Qwen
+            limit_mm_per_prompt={"image": self.max_images_per_prompt},
+            # Consider max_model_len if needed
         )
         print(f"vLLM EngineArgs: {engine_args}")
 
         try:
-             # *** FIX: Use asdict() instead of .to_dict() ***
             self.model = LLM(**asdict(engine_args))
             print("vLLM Engine loaded successfully for Qwen.")
         except Exception as e:
@@ -141,91 +163,86 @@ class QwenVLM(BaseVLM):
         end_time = time.time()
         print(f"vLLM Engine loading took {end_time - start_time:.2f} seconds.")
 
-# def generate(self, conversation, image_inputs, max_new_tokens: int = 256) -> str:
-#     """
-#     Generate a response for the given conversation and image inputs.
-#     """
-#     # Process the conversation and image inputs
-#     self.processor.apply_chat_template(
-#             conversation,
-#             tokenize=False,
-#             add_generation_prompt=True
-#         )
-#     inputs = self.processor(
-#         text=[prompt],
-#         images=image_inputs,
-#         padding=True,
-#         return_tensors="pt"
-#     )
 
-#     output_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
-
-#     generated_ids = [
-#         out_ids[len(in_ids):]
-#         for in_ids, out_ids in zip(inputs.input_ids, output_ids)
-#     ]
-
-#     output_text = processor.batch_decode(
-#         generated_ids,
-#         skip_special_tokens=True,
-#         clean_up_tokenization_spaces=True
-#     )
-
-#     print("\nModel output:")
-#     print(output_text[0])
-
-    def generate(self, conversation: list, image_inputs: list[Image.Image], max_new_tokens: int = 256) -> str:
+    # generate, _generate_hf, _generate_vllm, _build_qwen_prompt remain the same
+    # ... (paste existing methods here) ...
+    def generate(self, conversation: Union[List, Dict], image_inputs: List[Image.Image], max_new_tokens: int = 256) -> str:
         """ Generate text using the selected backend. """
+        # Qwen uses list internally, ensure input matches
+        if not isinstance(conversation, list):
+             raise TypeError("Qwen conversation must be a list.")
+
         if self.inference_backend == 'hf':
             return self._generate_hf(conversation, image_inputs, max_new_tokens)
         elif self.inference_backend == 'vllm':
-            # Note: This part might not work if Qwen-VL is not supported by vLLM
             return self._generate_vllm(conversation, image_inputs, max_new_tokens)
         else:
             raise ValueError(f"Unsupported inference_backend: {self.inference_backend}")
 
     def _generate_hf(self, conversation: list, image_inputs: list[Image.Image], max_new_tokens: int) -> str:
-        """ Generate using HuggingFace backend (existing logic). """
+        """ Generate using HuggingFace backend. """
         if not self.model or not self.hf_processor:
             raise RuntimeError("HF Model or processor not loaded for Qwen HF generation.")
 
-        # --- Start of existing Qwen HF generation logic ---
-        # (Keep the corrected HF generate logic from previous steps here)
-        # ... includes apply_chat_template, processor call, move_inputs_to_device, model.generate, decode ...
         try:
-            prompt = self._build_qwen_prompt(conversation)
-        except Exception as e:
-             raise RuntimeError(f"Failed to build Qwen prompt: {e}")
-
-        try:
-            inputs = self.hf_processor(
-                text=[prompt], images=image_inputs, return_tensors="pt", padding=True
+            # Let the processor handle image tags and text assembly
+            prompt_build_start_time = time.time()
+            # Qwen processor needs conversation structure directly
+            text = self.hf_processor.apply_chat_template(
+                conversation,
+                tokenize=False,
+                add_generation_prompt=True
             )
+            inputs = self.hf_processor(text=[text], images=image_inputs, return_tensors="pt", padding=True)
+            prompt_build_end_time = time.time()
+            #print(f"Qwen HF Prompt build/process time: {prompt_build_end_time - prompt_build_start_time:.2f}s")
+
         except Exception as e:
-            print(f"Error processing inputs with Qwen HF processor: {e}")
+            print(f"Error during Qwen HF processing/prompt building: {e}")
+            print(f"Conversation structure: {conversation}") # Log conversation on error
             raise
 
-        inputs = self.move_inputs_to_device(inputs)
+        inputs = self.move_inputs_to_device(inputs) # Use corrected base class method
 
         try:
-            generate_ids = self.model.generate(
-                input_ids=inputs['input_ids'],
-                pixel_values=inputs['pixel_values'],
-                attention_mask=inputs['attention_mask'],
-                max_new_tokens=max_new_tokens,
-                do_sample=False
-            )
-        except Exception as e:
-             print(f"Error during Qwen HF model.generate: {e}")
-             raise
+            gen_start_time = time.time()
+            with torch.no_grad():
+                 generate_ids = self.model.generate(
+                     input_ids=inputs['input_ids'],
+                     pixel_values=inputs['pixel_values'],
+                     attention_mask=inputs['attention_mask'],
+                     max_new_tokens=max_new_tokens,
+                     do_sample=False,
+                     pad_token_id=self.hf_processor.tokenizer.eos_token_id # Qwen often uses eos_token_id for padding
+                 )
+            gen_end_time = time.time()
+            #print(f"Qwen HF Generation time: {gen_end_time - gen_start_time:.2f}s")
 
+        except Exception as e:
+            print(f"Error during Qwen HF model.generate: {e}")
+            print(f"Input IDs shape: {inputs.get('input_ids').shape if inputs.get('input_ids') is not None else 'N/A'}")
+            print(f"Pixel Values shape: {inputs.get('pixel_values').shape if inputs.get('pixel_values') is not None else 'N/A'}")
+            print(f"Attention Mask shape: {inputs.get('attention_mask').shape if inputs.get('attention_mask') is not None else 'N/A'}")
+            raise
+
+        # Decode
+        decode_start_time = time.time()
         input_token_len = inputs['input_ids'].shape[1]
-        generated_ids_only = generate_ids[:, input_token_len:]
-        output_text = self.hf_processor.batch_decode(
-            generated_ids_only, skip_special_tokens=True, clean_up_tokenization_spaces=False
+
+        if generate_ids.shape[1] <= input_token_len:
+             print("Warning: Generation produced no new tokens or fewer tokens than input.")
+             generated_ids_only = torch.tensor([[]], dtype=torch.long, device=generate_ids.device) # Empty tensor
+        else:
+             generated_ids_only = generate_ids[:, input_token_len:]
+
+        # Use tokenizer directly for decoding Qwen outputs
+        output_text = self.hf_processor.tokenizer.batch_decode(
+            generated_ids_only, skip_special_tokens=True # Skip special tokens like <|im_end|>
         )[0]
+        decode_end_time = time.time()
+        #print(f"Qwen HF Decode time: {decode_end_time - decode_start_time:.2f}s")
+
         return output_text.strip()
-        # --- End of existing Qwen HF generation logic ---
 
 
     def _generate_vllm(self, conversation: list, image_inputs: list[Image.Image], max_new_tokens: int) -> str:
@@ -233,35 +250,37 @@ class QwenVLM(BaseVLM):
         if not self.model:
             raise RuntimeError("vLLM engine not loaded.")
         if not VLLM_AVAILABLE:
-             raise RuntimeError("vLLM library not available.")
+            raise RuntimeError("vLLM library not available.")
+        if not self.hf_processor:
+            raise RuntimeError("Qwen HF Processor required for vLLM prompt building but not loaded.")
 
-        # 1. Build the text prompt string
-        prompt_str = self._build_qwen_prompt(conversation)
-        # Ensure prompt includes correct Qwen placeholders (e.g., <img>, Picture 1:...)
-        # This should be handled by apply_chat_template with the Qwen processor.
 
-        # Optional: Use qwen-vl-utils for image preprocessing if available
+        # 1. Build the text prompt string using the HF processor's template
+        try:
+            prompt_str = self.hf_processor.apply_chat_template(
+                conversation,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+        except Exception as e:
+             print(f"Error applying Qwen chat template for vLLM: {e}")
+             raise RuntimeError(f"Failed to build Qwen prompt for vLLM: {e}") from e
+
+        # Image handling: vLLM typically takes PIL images directly
         final_image_inputs = image_inputs
-        if QWEN_UTILS_AVAILABLE and process_vision_info:
-            try:
-                # Note: process_vision_info might expect the message format
-                # used in the example. We may need to adapt our 'conversation'
-                # or mimic that structure if necessary. For now, let's assume
-                # direct PIL list works, like LLaVA. If errors occur, revisit this.
-                print("Note: Qwen-utils image processing step skipped for now. Using raw PIL images.")
-                # Example structure if needed:
-                # messages_for_utils = [{"role": "user", "content": [{"type": "image", "image": pil_img} for pil_img in image_inputs] + [{"type": "text", "text": "dummy text"}]}]
-                # processed_data, _ = process_vision_info(messages_for_utils)
-                # final_image_inputs = processed_data['image'] # Check actual output format
-            except Exception as e:
-                print(f"Warning: Failed to use qwen_vl_utils.process_vision_info: {e}. Using raw PIL images.")
+        # Qwen-utils processing step (currently disabled/optional)
+        # if QWEN_UTILS_AVAILABLE and process_vision_info: ...
 
         # 2. Define Sampling Parameters
+        # Check Qwen tokenizer for appropriate stop tokens (e.g., <|im_end|>, <|endoftext|>)
+        stop_token_ids = [self.hf_processor.tokenizer.eos_token_id]
+        # Add other relevant stop tokens if necessary
+        # stop_token_ids.append(self.hf_processor.tokenizer.convert_tokens_to_ids("<|im_end|>"))
+
         sampling_params = SamplingParams(
             max_tokens=max_new_tokens,
             temperature=0,
-             # Qwen might have specific stop tokens, check model card/tokenizer
-             # stop_token_ids=[...] # Add specific stop token IDs if needed
+            stop_token_ids=stop_token_ids
         )
 
         # 3. Generate using vLLM engine
@@ -275,11 +294,11 @@ class QwenVLM(BaseVLM):
 
             outputs = self.model.generate(request_dict, sampling_params=sampling_params)
 
-            if not outputs or outputs[0].outputs is None:
-                 print("Error: Qwen vLLM generation returned empty output.")
-                 return "[Qwen vLLM generation failed]"
+            if not outputs or not outputs[0].outputs:
+                print("Error: Qwen vLLM generation returned empty output.")
+                return "[Qwen vLLM generation failed]"
             if outputs[0].outputs[0].finish_reason == 'length':
-                 print("Warning: Max tokens reached during vLLM generation.")
+                print("Warning: Max tokens reached during vLLM generation.")
 
             # 4. Extract output text
             generated_text = outputs[0].outputs[0].text
@@ -289,38 +308,202 @@ class QwenVLM(BaseVLM):
             print(f"Error during Qwen vLLM generation: {e}")
             print(f"Prompt: {prompt_str}")
             print(f"Number of images passed: {len(final_image_inputs)}")
-            raise
-    def move_inputs_to_device(self, inputs):
-        """
-        Move the inputs to the appropriate device(s).
-        """
-        if self.device == "auto":
-            # If device is auto, let the processor handle it
-            return inputs
-        else:
-            # Move each tensor in the inputs to the specified device
-            for key in inputs.keys():
-                if isinstance(inputs[key], torch.Tensor):
-                    inputs[key] = inputs[key].to(self.device)
-            return inputs
+            raise RuntimeError(f"Qwen vLLM generation failed: {e}") from e
 
     def _build_qwen_prompt(self, conversation: list) -> str:
-        """ Applies chat template using HF processor. """
-        if not self.hf_processor:
+         """ Applies chat template using HF processor. Required by _generate_hf. """
+         if not self.hf_processor:
              # Fallback if processor failed: try simple concatenation (likely wrong format)
              print("Warning: HF Processor not available for Qwen prompt building.")
-             return "\n".join([item['text'] for item in conversation[0]['content'] if item['type'] == 'text'])
+             # Basic fallback assuming single turn user message
+             text_parts = []
+             if conversation and conversation[0].get("role") == "user":
+                  content = conversation[0].get("content", [])
+                  for item in content:
+                       if item.get("type") == "text":
+                            text_parts.append(item.get("text", ""))
+                       elif item.get("type") == "image":
+                            text_parts.append("Picture X:") # Generic placeholder
+             return "\n".join(text_parts) + "\nAssistant:" # Minimal fallback prompt
 
-        try:
-            # Apply chat template to get the final prompt string including image placeholders
-            prompt = self.hf_processor.apply_chat_template(
-                conversation,
-                tokenize=False,
-                add_generation_prompt=True
-            )
-            # Debug: print(f"Qwen Prompt String for backend '{self.inference_backend}':\n{prompt}")
-            return prompt
-        except Exception as e:
+
+         try:
+             # Apply chat template to get the final prompt string including image placeholders
+             prompt = self.hf_processor.apply_chat_template(
+                 conversation,
+                 tokenize=False,
+                 add_generation_prompt=True # Adds the prompt for the assistant's turn
+             )
+             # Debug: print(f"Qwen Prompt String for backend '{self.inference_backend}':\n{prompt}")
+             return prompt
+         except Exception as e:
              print(f"Error applying Qwen chat template: {e}")
-             raise
+             print(f"Conversation structure: {conversation}")
+             raise RuntimeError(f"Failed to build Qwen prompt: {e}") from e
 
+
+    @torch.no_grad() # Disable gradient calculation for inference
+    def score_multiple_choice(self, conversation: Union[List, Dict], image_inputs: List[Image.Image], choices: List[str]) -> Dict[str, float]:
+        """ Scores choices using HF backend logits for Qwen. """
+        # ... (backend/model/processor checks) ...
+        if self.inference_backend != 'hf':
+            raise NotImplementedError("score_multiple_choice is only implemented for the 'hf' backend.")
+        if not self.model or not self.hf_processor:
+            raise RuntimeError("HF Model or processor not loaded for score_multiple_choice.")
+        if not self.hf_processor.tokenizer:
+             raise RuntimeError("HF Processor does not have a tokenizer needed for scoring.")
+        if not isinstance(conversation, list):
+            raise TypeError("Qwen conversation must be a list for score_multiple_choice.")
+
+        tokenizer = self.hf_processor.tokenizer
+        # ... (Space Token ID detection logic remains the same) ...
+        space_token_id = tokenizer.encode(" ", add_special_tokens=False)
+        if len(space_token_id) == 1:
+            space_token_id = space_token_id[0]
+        elif len(space_token_id) == 0:
+             print("Warning: Qwen tokenizer encoded space as empty list. Space token logic might be inaccurate.")
+             space_token_id = -1
+        else:
+            print(f"Warning: Qwen tokenizer encoded single space as {space_token_id}. Cannot reliably detect space token.")
+            space_token_id = -1
+
+        # ... (Tokenize Choices logic remains the same) ...
+        choice_token_ids = []
+        choice_token_map = {}
+        print(f"Tokenizing choices for Qwen: {choices}")
+        for choice in choices:
+             choice_clean = choice.strip()
+             token_ids = tokenizer.encode(choice_clean, add_special_tokens=False)
+             target_token_id = -1
+             if not token_ids: continue # Skip empty
+             # Logic to get actual token ID (handle space prefix)
+             if space_token_id != -1 and len(token_ids) == 2 and token_ids[0] == space_token_id:
+                 target_token_id = token_ids[1]
+             elif len(token_ids) == 1:
+                 target_token_id = token_ids[0]
+             else:
+                 target_token_id = token_ids[0] # Fallback
+                 # Warning about unexpected tokenization (already included)
+             if target_token_id != -1:
+                  choice_token_ids.append(target_token_id)
+                  choice_token_map[target_token_id] = choice
+
+        print(f"Target Qwen token IDs: {choice_token_ids}")
+        if not choice_token_ids:
+              print("Error: No valid token IDs found for any choices.")
+              return {choice: 0.0 for choice in choices}
+
+        # --- Process Prompt and Images ---
+        try:
+            text = self.hf_processor.apply_chat_template(
+                conversation, tokenize=False, add_generation_prompt=True
+            )
+            inputs = self.hf_processor(text=[text], images=image_inputs, return_tensors="pt", padding=True)
+        except Exception as e:
+            print(f"Error processing inputs/prompt for Qwen scoring: {e}")
+            raise
+        inputs = self.move_inputs_to_device(inputs)
+
+        # --- Get Logits for the NEXT token (with Fallback) ---
+        next_token_logits = None
+        try:
+            # --- Attempt 1: Use model.generate ---
+            print("Attempting logit retrieval via model.generate...")
+            outputs = self.model.generate(
+                input_ids=inputs['input_ids'],
+                pixel_values=inputs['pixel_values'],
+                attention_mask=inputs['attention_mask'],
+                max_new_tokens=1,
+                output_scores=True,
+                return_dict_in_generate=True,
+                do_sample=False,
+                num_beams=1, # Explicitly force greedy search
+                pad_token_id=tokenizer.eos_token_id
+            )
+
+            # Check if scores are valid
+            if hasattr(outputs, 'scores') and outputs.scores is not None and len(outputs.scores) > 0:
+                if outputs.scores[0] is not None:
+                    next_token_logits = outputs.scores[0][0] # Batch index 0
+                    print("Logits successfully retrieved via model.generate.")
+                else:
+                    print("Warning: model.generate returned scores tuple, but first element is None.")
+            else:
+                print("Warning: model.generate did not return valid scores attribute or it was empty.")
+                # Debugging: Print available keys/attributes if scores are missing
+                # if hasattr(outputs, 'keys'): print(f"Generate output keys: {outputs.keys()}")
+                # else: print(f"Generate output attributes: {dir(outputs)}")
+
+            # --- Attempt 2: Fallback to direct model forward pass ---
+            if next_token_logits is None:
+                print("Attempting fallback logit retrieval via model forward pass...")
+                model_output = self.model(
+                    input_ids=inputs['input_ids'],
+                    pixel_values=inputs['pixel_values'],
+                    attention_mask=inputs['attention_mask']
+                )
+                # Logits tensor typically has shape [batch_size, sequence_length, vocab_size]
+                if hasattr(model_output, 'logits') and model_output.logits is not None:
+                     # Get logits for the last token position in the input sequence
+                     next_token_logits = model_output.logits[0, -1, :] # Batch 0, last token, all logits
+                     print("Logits successfully retrieved via model forward pass.")
+                else:
+                     print("Error: Fallback model forward pass also failed to provide logits.")
+                     # Debugging: Print details about the forward pass output
+                     # print(f"Forward pass output type: {type(model_output)}")
+                     # if hasattr(model_output, 'keys'): print(f"Forward pass output keys: {model_output.keys()}")
+                     # else: print(f"Forward pass output attributes: {dir(model_output)}")
+                     raise RuntimeError("Failed to obtain logits using both generate and forward pass.")
+
+        except Exception as e:
+             print(f"Error during Qwen model generation/logit retrieval: {e}")
+             traceback.print_exc() # Print detailed traceback for the error
+             raise RuntimeError("Failed to obtain logits for Qwen scoring.") from e
+
+        # --- Ensure logits were obtained ---
+        if next_token_logits is None:
+             # This should be caught by exceptions above, but added as a safeguard
+             raise RuntimeError("Logit retrieval failed silently (next_token_logits is None).")
+
+        # --- Calculate Probabilities for Choices ---
+        # (Rest of the logic: filter valid tokens, softmax, map to choices)
+        result_probs = {}
+        valid_choices_found = set()
+        # Filter target token IDs to be within the vocabulary size
+        valid_choice_token_ids_in_vocab = [tid for tid in choice_token_ids if tid >= 0 and tid < next_token_logits.shape[0]]
+
+        if len(valid_choice_token_ids_in_vocab) != len(choice_token_ids):
+             original_ids = set(choice_token_ids)
+             valid_ids = set(valid_choice_token_ids_in_vocab)
+             invalid_ids = original_ids - valid_ids
+             print(f"Warning: Some choice token IDs {invalid_ids} were out of vocabulary range ({next_token_logits.shape[0]}).")
+
+        if not valid_choice_token_ids_in_vocab:
+             print("Error: None of the target token IDs are valid for the model's vocabulary.")
+             return {choice: 0.0 for choice in choices}
+
+        # Extract logits only for the valid target token IDs
+        choice_logits = next_token_logits[valid_choice_token_ids_in_vocab]
+
+        # Apply Softmax to get probabilities *over the valid choices only*
+        choice_probs = F.softmax(choice_logits, dim=-1)
+
+        # Create the result dictionary mapping choice string to probability
+        for i, token_id in enumerate(valid_choice_token_ids_in_vocab):
+            original_choice = choice_token_map.get(token_id)
+            if original_choice:
+                 result_probs[original_choice] = choice_probs[i].item()
+                 valid_choices_found.add(original_choice)
+            else:
+                 # This indicates an internal logic error in choice_token_map construction
+                 print(f"Internal Error: Could not map valid Qwen token ID {token_id} back to an original choice.")
+
+        # Ensure all original choices are present, assigning 0.0 if invalid/skipped
+        final_result = {choice: result_probs.get(choice, 0.0) for choice in choices}
+
+        print(f"Calculated Qwen probabilities: {final_result}")
+        return final_result
+
+
+
+    # move_inputs_to_device is now in BaseVLM
