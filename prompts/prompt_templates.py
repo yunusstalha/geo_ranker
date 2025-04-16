@@ -29,7 +29,7 @@ def build_pointwise_qwen(mode='basic'):
                     {"type": "text", "text": "Here is a candidate satellite image:"},
                     {"type": "image"}, # Placeholder for candidate image (index 1)
                     {"type": "text", "text": "Evaluate if the satellite image corresponds to the location shown in the ground-level panorama."},
-                    {"type": "text", "text": "Provide a confidence score between 0 (no match) and 100 (perfect match)."},
+                    {"type": "text", "text": "Provide a confidence score between 0 (no match) and 100 (perfect match). Give descriptive scores."},
                     {"type": "text", "text": "Respond ONLY with a JSON object containing the score, like this: {\"score\": <score_value>}"}
                 ]
             }
@@ -48,7 +48,7 @@ def build_pointwise_qwen(mode='basic'):
                     {"type": "image"}, # Placeholder for candidate image (index 1)
                     {"type": "text", "text": "Evaluate if the satellite image corresponds to the location shown in the ground-level panorama."},
                     {"type": "text", "text": "First, provide a brief step-by-step reasoning comparing key visual features (e.g., road layout, building shapes, landmarks)."},
-                    {"type": "text", "text": "Then, provide a confidence score between 0 (no match) and 100 (perfect match)."},
+                    {"type": "text", "text": "Then, provide a confidence score between 0 (no match) and 100 (perfect match). Give descriptive scores."},
                     {"type": "text", "text": "Respond ONLY with a JSON object containing the reasoning and score, like this: {\"reasoning\": \"<your_reasoning>\", \"score\": <score_value>}"}
                 ]
             }
@@ -112,7 +112,7 @@ def build_pointwise_llava(mode='basic'):
             {"type": "text", "text": "Here is a candidate satellite image:"},
             {"type": "image"}, # Placeholder for candidate image (index 1)
             {"type": "text", "text": "Evaluate if the satellite image corresponds to the location shown in the ground-level panorama."},
-            {"type": "text", "text": "Provide a confidence score between 0 (no match) and 100 (perfect match)."},
+            {"type": "text", "text": "Provide a confidence score between 0 (no match) and 100 (perfect match). Give descriptive scores. "},
             {"type": "text", "text": "Respond ONLY with a JSON object containing the score, like this: {\"score\": <score_value>}"}
         ]
     elif mode == 'reasoning':
@@ -123,7 +123,7 @@ def build_pointwise_llava(mode='basic'):
             {"type": "image"}, # Placeholder for candidate image (index 1)
             {"type": "text", "text": "Evaluate if the satellite image corresponds to the location shown in the ground-level panorama."},
             {"type": "text", "text": "First, provide a brief step-by-step reasoning comparing key visual features (e.g., road layout, building shapes, landmarks)."},
-            {"type": "text", "text": "Then, provide a confidence score between 0 (no match) and 100 (perfect match)."},
+            {"type": "text", "text": "Then, provide a confidence score between 0 (no match) and 100 (perfect match). Give descriptive scores. "},
             {"type": "text", "text": "Respond ONLY with a JSON object containing the reasoning and score (only the value), like this: {\"reasoning\": \"<your_reasoning>\", \"score\": <score_value>}"}
         ]
     else:
@@ -171,7 +171,7 @@ def build_pairwise_llava(mode='basic'):
     # Structure for LLaVA: a single user turn
     conversation = [{"role": "user", "content": content}]
     return conversation
-    
+
 def get_prompt_builder(vlm_type: str, strategy: str):
     """ Returns the correct prompt builder function based on VLM and strategy. """
     builder_map = {

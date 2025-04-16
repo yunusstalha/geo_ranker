@@ -31,13 +31,15 @@ class LlavaVLM(BaseVLM):
                  use_bf16: bool = True, # For HF
                  use_quantization: bool = False, # Controls quantization for both
                  inference_backend: str = 'hf', # 'hf' or 'vllm'
-                 tensor_parallel_size: int = 1 # For vLLM
+                 tensor_parallel_size: int = 1, # For vLLM
+                 max_images_per_prompt: int = 5, # For vLLM
                 ):
         """ Initialize LLaVA for HF or vLLM backend. """
         self.use_bf16 = use_bf16 and torch.cuda.is_available() and torch.cuda.is_bf16_supported()
         # Store backend-specific args before calling super
         self.use_quantization = use_quantization
         self.tensor_parallel_size = tensor_parallel_size
+        self.max_images_per_prompt = max_images_per_prompt
         super().__init__(model_name=model_name, device=device, inference_backend=inference_backend)
 
     def _load_model(self):
@@ -121,7 +123,7 @@ class LlavaVLM(BaseVLM):
             vllm_quantization = "awq"
             print(f"Applying vLLM quantization: {vllm_quantization}")
 
-        max_images_per_prompt = 5
+        max_images_per_prompt = self.max_images_per_prompt
         engine_args = EngineArgs(
             model=self.model_name,
             quantization=vllm_quantization,

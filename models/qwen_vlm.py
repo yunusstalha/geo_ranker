@@ -15,7 +15,7 @@ try:
     from vllm import LLM, EngineArgs, SamplingParams
     VLLM_AVAILABLE = True
     from qwen_vl_utils import process_vision_info
-    QWEN_UTILS_AVAILABLE = True
+    QWEN_UTILS_AVAILABLE = False
 except ImportError:
     process_vision_info = None
     QWEN_UTILS_AVAILABLE = False
@@ -35,11 +35,13 @@ class QwenVLM(BaseVLM):
                  use_bf16: bool = True,
                  use_quantization: bool = False,
                  inference_backend: str = 'hf', # 'hf' or 'vllm'
-                 tensor_parallel_size: int = 1 # For vLLM
+                 tensor_parallel_size: int = 1, # For vLLM
+                 max_images_per_prompt: int = 5, # For vLLM
                 ):
         self.use_bf16 = use_bf16 and torch.cuda.is_available() and torch.cuda.is_bf16_supported()
         self.use_quantization = use_quantization
         self.tensor_parallel_size = tensor_parallel_size
+        self.max_images_per_prompt = max_images_per_prompt
         super().__init__(model_name=model_name, device=device, inference_backend=inference_backend)
 
 
@@ -118,7 +120,7 @@ class QwenVLM(BaseVLM):
             vllm_quantization = "awq"
             print(f"Applying vLLM quantization: {vllm_quantization}")
 
-        max_images_per_prompt = 5
+        max_images_per_prompt = self.max_images_per_prompt
         engine_args = EngineArgs(
             model=self.model_name,
             quantization=vllm_quantization,
