@@ -333,14 +333,13 @@ class LlavaVLM(BaseVLM):
         prompt_str = self._build_llava_prompt(conversation)
         tokenizer = self.hf_processor.tokenizer
         space_token_id = tokenizer.encode(" ", add_special_tokens=False)
-        print(f"Space token ID: {space_token_id}")
 
         space_token_id = 29871
 
         # --- Tokenize Choices ---
         choice_token_ids = []
         choice_token_map = {} # Map first token ID back to original choice string
-        print(f"Tokenizing choices for LLaVA: {choices}")
+        # print(f"Tokenizing choices for LLaVA: {choices}")
         for choice in choices:
             choice_clean = choice.strip()
             token_ids = tokenizer.encode(choice_clean, add_special_tokens=False)
@@ -375,7 +374,7 @@ class LlavaVLM(BaseVLM):
                  # Debug: print(f"  Mapping target token {target_token_id} to original choice '{choice}'")
 
 
-        print(f"Target token IDs: {choice_token_ids}") # Should now contain digit tokens etc.
+        # print(f"Target token IDs: {choice_token_ids}") # Should now contain digit tokens etc.
         if not choice_token_ids:
              print("Error: No valid token IDs found for any choices.")
              return {choice: 0.0 for choice in choices} # Return zero probabilities
@@ -455,7 +454,7 @@ class LlavaVLM(BaseVLM):
         final_result = {choice: result_probs.get(choice, 0.0) for choice in choices}
 
 
-        print(f"Calculated LLaVA probabilities: {final_result}")
+        # print(f"Calculated LLaVA probabilities: {final_result}")
         return final_result
 
 

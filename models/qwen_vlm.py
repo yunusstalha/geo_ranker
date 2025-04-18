@@ -340,58 +340,50 @@ class QwenVLM(BaseVLM):
              raise RuntimeError(f"Failed to build Qwen prompt: {e}") from e
 
 
-    @torch.no_grad() # Disable gradient calculation for inference
+    @torch.no_grad()
     def score_multiple_choice(self, conversation: Union[List, Dict], image_inputs: List[Image.Image], choices: List[str]) -> Dict[str, float]:
-        """ Scores choices using HF backend logits for Qwen. """
-        # ... (backend/model/processor checks) ...
+        """
+        Scores choices using HF backend logits for Qwen.
+        Uses generate with **inputs syntax and max_new_tokens > 1.
+        """
         if self.inference_backend != 'hf':
             raise NotImplementedError("score_multiple_choice is only implemented for the 'hf' backend.")
-        if not self.model or not self.hf_processor:
-            raise RuntimeError("HF Model or processor not loaded for score_multiple_choice.")
-        if not self.hf_processor.tokenizer:
-             raise RuntimeError("HF Processor does not have a tokenizer needed for scoring.")
-        if not isinstance(conversation, list):
-            raise TypeError("Qwen conversation must be a list for score_multiple_choice.")
+        # ... (other checks: model, processor, tokenizer, conversation type) ...
+        if not self.model or not self.hf_processor: raise RuntimeError("HF Model/processor not loaded")
+        if not self.hf_processor.tokenizer: raise RuntimeError("HF Processor tokenizer missing")
+        if not isinstance(conversation, list): raise TypeError("Qwen conversation must be a list")
 
         tokenizer = self.hf_processor.tokenizer
-        # ... (Space Token ID detection logic remains the same) ...
-        space_token_id = tokenizer.encode(" ", add_special_tokens=False)
-        if len(space_token_id) == 1:
-            space_token_id = space_token_id[0]
-        elif len(space_token_id) == 0:
-             print("Warning: Qwen tokenizer encoded space as empty list. Space token logic might be inaccurate.")
-             space_token_id = -1
-        else:
-            print(f"Warning: Qwen tokenizer encoded single space as {space_token_id}. Cannot reliably detect space token.")
-            space_token_id = -1
 
-        # ... (Tokenize Choices logic remains the same) ...
+        # --- Determine Space Token ID (remains the same) ---
+        space_token_id = tokenizer.encode(" ", add_special_tokens=False)
+        if len(space_token_id) == 1: space_token_id = space_token_id[0]
+        else: space_token_id = -1 # Ambiguous
+
+        # --- Tokenize Choices (remains the same) ---
         choice_token_ids = []
         choice_token_map = {}
-        print(f"Tokenizing choices for Qwen: {choices}")
+        # print(f"Tokenizing choices for Qwen: {choices}")
         for choice in choices:
              choice_clean = choice.strip()
              token_ids = tokenizer.encode(choice_clean, add_special_tokens=False)
              target_token_id = -1
-             if not token_ids: continue # Skip empty
-             # Logic to get actual token ID (handle space prefix)
+             if not token_ids: continue
              if space_token_id != -1 and len(token_ids) == 2 and token_ids[0] == space_token_id:
                  target_token_id = token_ids[1]
              elif len(token_ids) == 1:
                  target_token_id = token_ids[0]
              else:
                  target_token_id = token_ids[0] # Fallback
-                 # Warning about unexpected tokenization (already included)
              if target_token_id != -1:
                   choice_token_ids.append(target_token_id)
                   choice_token_map[target_token_id] = choice
-
-        print(f"Target Qwen token IDs: {choice_token_ids}")
+        # print(f"Target Qwen token IDs: {choice_token_ids}")
         if not choice_token_ids:
               print("Error: No valid token IDs found for any choices.")
               return {choice: 0.0 for choice in choices}
 
-        # --- Process Prompt and Images ---
+        # --- Process Prompt and Images (remains the same) ---
         try:
             text = self.hf_processor.apply_chat_template(
                 conversation, tokenize=False, add_generation_prompt=True
@@ -402,101 +394,66 @@ class QwenVLM(BaseVLM):
             raise
         inputs = self.move_inputs_to_device(inputs)
 
-        # --- Get Logits for the NEXT token (with Fallback) ---
+        # --- Get Logits for the NEXT token (Using generate with **inputs) ---
         next_token_logits = None
+        # Define how many tokens to generate (needs to be > 1 potentially)
         try:
-            # --- Attempt 1: Use model.generate ---
-            print("Attempting logit retrieval via model.generate...")
+            # *** CORRECTION HERE: Use **inputs unpacking ***
             outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=5,
-                output_scores=True,
+                **inputs,                           # Pass all processed inputs
+                max_new_tokens=1,
+                output_scores=True,                 # Still request scores
                 return_dict_in_generate=True,
                 do_sample=False,
+                num_beams=1,                     # Force greedy explicitly
                 pad_token_id=tokenizer.eos_token_id
             )
-            print('Outputs from model.generate:', outputs)
-            # Check if scores are valid
+
+            # Check if scores are available and valid for the first token
             if hasattr(outputs, 'scores') and outputs.scores is not None and len(outputs.scores) > 0:
                 if outputs.scores[0] is not None:
-                    next_token_logits = outputs.scores[0][0] # Batch index 0
-                    print("Logits successfully retrieved via model.generate.")
+                    next_token_logits = outputs.scores[0][0] # Batch index 0, First token's scores
+                    # print("Logits successfully retrieved via model.generate (first token scores).")
                 else:
-                    print("Warning: model.generate returned scores tuple, but first element is None.")
+                    print("Warning: model.generate returned scores tuple, but the first element (scores for first token) is None.")
             else:
-                print("Warning: model.generate did not return valid scores attribute or it was empty.")
-                # Debugging: Print available keys/attributes if scores are missing
-                # if hasattr(outputs, 'keys'): print(f"Generate output keys: {outputs.keys()}")
-                # else: print(f"Generate output attributes: {dir(outputs)}")
+                print("Warning: model.generate did not return valid scores attribute or it was empty/None.")
+                # Log details if scores are missing
+                # print(f"Generate output keys: {hasattr(outputs, 'keys') and outputs.keys()}")
+                # print(f"Generate output scores attribute: {getattr(outputs, 'scores', 'MISSING')}")
 
-            # --- Attempt 2: Fallback to direct model forward pass ---
-            if next_token_logits is None:
-                print("Attempting fallback logit retrieval via model forward pass...")
-                model_output = self.model(
-                    input_ids=inputs['input_ids'],
-                    pixel_values=inputs['pixel_values'],
-                    attention_mask=inputs['attention_mask']
-                )
-                # Logits tensor typically has shape [batch_size, sequence_length, vocab_size]
-                if hasattr(model_output, 'logits') and model_output.logits is not None:
-                     # Get logits for the last token position in the input sequence
-                     next_token_logits = model_output.logits[0, -1, :] # Batch 0, last token, all logits
-                     print("Logits successfully retrieved via model forward pass.")
-                else:
-                     print("Error: Fallback model forward pass also failed to provide logits.")
-                     # Debugging: Print details about the forward pass output
-                     # print(f"Forward pass output type: {type(model_output)}")
-                     # if hasattr(model_output, 'keys'): print(f"Forward pass output keys: {model_output.keys()}")
-                     # else: print(f"Forward pass output attributes: {dir(model_output)}")
-                     raise RuntimeError("Failed to obtain logits using both generate and forward pass.")
 
         except Exception as e:
-             print(f"Error during Qwen model generation/logit retrieval: {e}")
-             traceback.print_exc() # Print detailed traceback for the error
-             raise RuntimeError("Failed to obtain logits for Qwen scoring.") from e
+             print(f"Error during Qwen model generation/logit retrieval using **inputs: {e}")
+             traceback.print_exc()
+             raise RuntimeError("Failed to obtain logits for Qwen scoring using generate with **inputs.") from e
 
         # --- Ensure logits were obtained ---
         if next_token_logits is None:
-             # This should be caught by exceptions above, but added as a safeguard
-             raise RuntimeError("Logit retrieval failed silently (next_token_logits is None).")
+             raise RuntimeError("Logit retrieval failed (next_token_logits is None after generate). Check warnings above.")
 
         # --- Calculate Probabilities for Choices ---
-        # (Rest of the logic: filter valid tokens, softmax, map to choices)
+        # (Rest of the logic remains the same: filter valid tokens, softmax, map to choices)
+        # ...
         result_probs = {}
-        valid_choices_found = set()
-        # Filter target token IDs to be within the vocabulary size
         valid_choice_token_ids_in_vocab = [tid for tid in choice_token_ids if tid >= 0 and tid < next_token_logits.shape[0]]
-
         if len(valid_choice_token_ids_in_vocab) != len(choice_token_ids):
-             original_ids = set(choice_token_ids)
-             valid_ids = set(valid_choice_token_ids_in_vocab)
-             invalid_ids = original_ids - valid_ids
+             invalid_ids = set(choice_token_ids) - set(valid_choice_token_ids_in_vocab)
              print(f"Warning: Some choice token IDs {invalid_ids} were out of vocabulary range ({next_token_logits.shape[0]}).")
-
         if not valid_choice_token_ids_in_vocab:
              print("Error: None of the target token IDs are valid for the model's vocabulary.")
              return {choice: 0.0 for choice in choices}
 
-        # Extract logits only for the valid target token IDs
         choice_logits = next_token_logits[valid_choice_token_ids_in_vocab]
-
-        # Apply Softmax to get probabilities *over the valid choices only*
         choice_probs = F.softmax(choice_logits, dim=-1)
 
-        # Create the result dictionary mapping choice string to probability
         for i, token_id in enumerate(valid_choice_token_ids_in_vocab):
             original_choice = choice_token_map.get(token_id)
             if original_choice:
                  result_probs[original_choice] = choice_probs[i].item()
-                 valid_choices_found.add(original_choice)
-            else:
-                 # This indicates an internal logic error in choice_token_map construction
-                 print(f"Internal Error: Could not map valid Qwen token ID {token_id} back to an original choice.")
-
-        # Ensure all original choices are present, assigning 0.0 if invalid/skipped
         final_result = {choice: result_probs.get(choice, 0.0) for choice in choices}
 
-        print(f"Calculated Qwen probabilities: {final_result}")
+        # print(f"Calculated Qwen probabilities: {final_result}")
         return final_result
 
 

@@ -14,8 +14,8 @@ from prompts.prompt_templates import get_prompt_builder
 
 # --- Example Image Paths ---
 DEFAULT_EXAMPLE_QUERY_IMG = "/research/nfs_yilmaz_15/yunus/data/VIGOR/SanFrancisco/panorama/ScGwgVhnS9mLGl47wRnicQ,37.752695,-122.437849,.jpg"
-DEFAULT_EXAMPLE_SAT_IMG_2 = "/research/nfs_yilmaz_15/yunus/data/VIGOR/SanFrancisco/satellite/satellite_37.752731622631885_-122.43810708310743.png" # Incorrect match
-DEFAULT_EXAMPLE_SAT_IMG_1 = "/research/nfs_yilmaz_15/yunus/data/VIGOR/SanFrancisco/satellite/satellite_37.752731622631885_-122.43769208587767.png" # Correct match
+DEFAULT_EXAMPLE_SAT_IMG_1 = "/research/nfs_yilmaz_15/yunus/data/VIGOR/SanFrancisco/satellite/satellite_37.752731622631885_-122.43810708310743.png" # Incorrect match
+DEFAULT_EXAMPLE_SAT_IMG_2 = "/research/nfs_yilmaz_15/yunus/data/VIGOR/SanFrancisco/satellite/satellite_37.752731622631885_-122.43769208587767.png" # Correct match
 
 def check_image_path(path, label="Image"):
     """ Checks if path exists, prints warning if not. """
