@@ -21,8 +21,8 @@ except ImportError:
 
 from .base_vlm import BaseVLM
 import time
-import base64 # Ensure imported here too
-import io     # Ensure imported here too
+import base64 
+import io     
 from typing import List, Dict, Union # Added typing
 
 class LlavaVLM(BaseVLM):
@@ -64,7 +64,7 @@ class LlavaVLM(BaseVLM):
         print(f"Loading LLaVA model for HF backend: {self.model_name}...")
         start_time = time.time()
 
-        # --- Start of existing HF loading logic ---
+        # --- Start of HF loading logic ---
         quantization_config = None
         if self.use_quantization and self.hf_device != "cpu": # Quantization only on CUDA
             print("Applying 4-bit BitsAndBytes quantization for HF...")
@@ -195,12 +195,10 @@ class LlavaVLM(BaseVLM):
 
         full_text = "\n".join(prompt_text_parts)
 
-        # Construct the standard USER/ASSISTANT prompt format
-        # Handle potential missing system prompt if needed by model version
+  
         # LLaVA 1.5 typically uses "USER: ...\nASSISTANT:"
         prompt = f"USER: {full_text}\nASSISTANT:"
 
-        # Debugging log (optional)
         # print(f"Built LLaVA Prompt:\n{prompt}")
         # print(f"Number of image placeholders in prompt string: {prompt.count('<image>')}")
 
@@ -208,7 +206,6 @@ class LlavaVLM(BaseVLM):
 
 
     # generate, _generate_hf, _generate_vllm remain the same
-    # ... (paste existing methods here) ...
     def generate(self, conversation: Union[List, Dict], image_inputs: List[Image.Image], max_new_tokens: int = 256) -> str:
         """ Generate text using the selected backend. """
         if not isinstance(conversation, list):
@@ -221,7 +218,8 @@ class LlavaVLM(BaseVLM):
             return self._generate_vllm(conversation, image_inputs, max_new_tokens)
         else:
             raise ValueError(f"Unsupported inference_backend: {self.inference_backend}")
-
+        
+    @torch.no_grad() # Disable gradient calculation for inference
     def _generate_hf(self, conversation: list, image_inputs: list[Image.Image], max_new_tokens: int) -> str:
         """ Generate using HuggingFace backend. """
         if not self.model or not self.hf_processor:
@@ -239,7 +237,6 @@ class LlavaVLM(BaseVLM):
         inputs = self.move_inputs_to_device(inputs) # Use the corrected base class method
 
         # Generate with HF model
-        # Use do_sample=False for deterministic scoring/preference unless exploring
         try:
              with torch.no_grad(): # Ensure no gradients are calculated
                  generate_ids = self.model.generate(
@@ -250,7 +247,6 @@ class LlavaVLM(BaseVLM):
                  )
         except Exception as e:
              print(f"Error during LLaVA HF model.generate: {e}")
-             # You might want to log more details about inputs here
              print(f"Input IDs shape: {inputs.get('input_ids').shape if inputs.get('input_ids') is not None else 'N/A'}")
              raise
 
@@ -316,7 +312,7 @@ class LlavaVLM(BaseVLM):
             raise RuntimeError(f"LLaVA vLLM generation failed: {e}") from e
 
 
-    @torch.no_grad() # Disable gradient calculation for inference
+    @torch.no_grad() 
     def score_multiple_choice(self, conversation: Union[List, Dict], image_inputs: List[Image.Image], choices: List[str]) -> Dict[str, float]:
         """ Scores choices using HF backend logits. """
         if self.inference_backend != 'hf':
@@ -354,13 +350,9 @@ class LlavaVLM(BaseVLM):
             if len(token_ids) == 2 and token_ids[0] == space_token_id:
                 # If encoded as [space, actual_token], use the second one
                 target_token_id = token_ids[1]
-                # Optional: Log this case
-                # print(f"  Info: Choice '{choice_clean}' tokenized as [space, word/digit]. Using second token ID {target_token_id}.")
             elif len(token_ids) == 1:
                 # If encoded as a single token, use that one
                 target_token_id = token_ids[0]
-                # Optional: Log this case
-                # print(f"  Info: Choice '{choice_clean}' tokenized as single token ID {target_token_id}.")
             else:
                 # Handle unexpected cases (e.g., >2 tokens, or multiple tokens not starting with space)
                 target_token_id = token_ids[1] # Default to first token as fallback
@@ -371,7 +363,6 @@ class LlavaVLM(BaseVLM):
                  choice_token_ids.append(target_token_id)
                  # Use the *original* choice string as the key in the map
                  choice_token_map[target_token_id] = choice
-                 # Debug: print(f"  Mapping target token {target_token_id} to original choice '{choice}'")
 
 
         # print(f"Target token IDs: {choice_token_ids}") # Should now contain digit tokens etc.
@@ -438,13 +429,13 @@ class LlavaVLM(BaseVLM):
 
 
         for i, token_id in enumerate(valid_choice_token_ids_in_vocab):
-            # Map the *valid* token ID back to the *original* choice string
+            # Map the valid token ID back to the original choice string
             original_choice = choice_token_map.get(token_id)
             if original_choice:
                  # Assign the probability corresponding to this valid token
                  result_probs[original_choice] = choice_probs[i].item()
                  valid_choices_found.add(original_choice)
-                 # Debug: print(f"  Assigned prob {choice_probs[i].item():.4f} to choice '{original_choice}' (token {token_id})")
+                 # print(f"  Assigned prob {choice_probs[i].item():.4f} to choice '{original_choice}' (token {token_id})")
 
             else:
                  # This indicates an internal logic error in choice_token_map
@@ -458,4 +449,3 @@ class LlavaVLM(BaseVLM):
         return final_result
 
 
-    # move_inputs_to_device is now in BaseVLM

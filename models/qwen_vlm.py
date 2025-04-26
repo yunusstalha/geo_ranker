@@ -47,7 +47,6 @@ class QwenVLM(BaseVLM):
         self.use_quantization = use_quantization
         self.tensor_parallel_size = tensor_parallel_size
         self.max_images_per_prompt = max_images_per_prompt
-        # Pass potentially resolved device to super()
         resolved_device = device
         if device == "auto":
             resolved_device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -104,15 +103,14 @@ class QwenVLM(BaseVLM):
                 torch_dtype=model_dtype_arg,
                 quantization_config=quantization_config_bnb,
                 trust_remote_code=True,
+                attn_implementation="flash_attention_2", 
             )
             self.model.eval()
-             # Determine the actual device after loading
             if hasattr(self.model, 'device'):
                 self.hf_device = str(self.model.device) # Update hf_device based on actual placement
                 print(f"HF Model loaded. Device map: {getattr(self.model, 'hf_device_map', 'N/A')}. Effective device: {self.hf_device}")
             else:
                  # Qwen model might store device differently or not have a top-level .device
-                 # We rely on the device_map argument primarily here.
                  print(f"HF Model loaded. Device map used: {effective_device_map}. Cannot determine final device from model object.")
 
 
@@ -139,7 +137,7 @@ class QwenVLM(BaseVLM):
 
         vllm_quantization = None
         if self.use_quantization:
-            vllm_quantization = "awq" # Check vLLM+Qwen docs for supported methods
+            vllm_quantization = "awq" 
             print(f"Applying vLLM quantization: {vllm_quantization}")
 
         # Use self.max_images_per_prompt passed during init
@@ -149,7 +147,6 @@ class QwenVLM(BaseVLM):
             tensor_parallel_size=self.tensor_parallel_size,
             trust_remote_code=True, # Essential for Qwen
             limit_mm_per_prompt={"image": self.max_images_per_prompt},
-            # Consider max_model_len if needed
         )
         print(f"vLLM EngineArgs: {engine_args}")
 
@@ -164,8 +161,6 @@ class QwenVLM(BaseVLM):
         print(f"vLLM Engine loading took {end_time - start_time:.2f} seconds.")
 
 
-    # generate, _generate_hf, _generate_vllm, _build_qwen_prompt remain the same
-    # ... (paste existing methods here) ...
     def generate(self, conversation: Union[List, Dict], image_inputs: List[Image.Image], max_new_tokens: int = 256) -> str:
         """ Generate text using the selected backend. """
         # Qwen uses list internally, ensure input matches
@@ -178,7 +173,8 @@ class QwenVLM(BaseVLM):
             return self._generate_vllm(conversation, image_inputs, max_new_tokens)
         else:
             raise ValueError(f"Unsupported inference_backend: {self.inference_backend}")
-
+    
+    @torch.no_grad() # Disable gradient calculation for inference
     def _generate_hf(self, conversation: list, image_inputs: list[Image.Image], max_new_tokens: int) -> str:
         """ Generate using HuggingFace backend. """
         if not self.model or not self.hf_processor:
@@ -267,7 +263,6 @@ class QwenVLM(BaseVLM):
         # Image handling: vLLM typically takes PIL images directly
         final_image_inputs = image_inputs
         # Qwen-utils processing step (currently disabled/optional)
-        # if QWEN_UTILS_AVAILABLE and process_vision_info: ...
 
         # 2. Define Sampling Parameters
         # Check Qwen tokenizer for appropriate stop tokens (e.g., <|im_end|>, <|endoftext|>)
@@ -332,7 +327,7 @@ class QwenVLM(BaseVLM):
                  tokenize=False,
                  add_generation_prompt=True # Adds the prompt for the assistant's turn
              )
-             # Debug: print(f"Qwen Prompt String for backend '{self.inference_backend}':\n{prompt}")
+             # print(f"Qwen Prompt String for backend '{self.inference_backend}':\n{prompt}")
              return prompt
          except Exception as e:
              print(f"Error applying Qwen chat template: {e}")
@@ -348,7 +343,6 @@ class QwenVLM(BaseVLM):
         """
         if self.inference_backend != 'hf':
             raise NotImplementedError("score_multiple_choice is only implemented for the 'hf' backend.")
-        # ... (other checks: model, processor, tokenizer, conversation type) ...
         if not self.model or not self.hf_processor: raise RuntimeError("HF Model/processor not loaded")
         if not self.hf_processor.tokenizer: raise RuntimeError("HF Processor tokenizer missing")
         if not isinstance(conversation, list): raise TypeError("Qwen conversation must be a list")
@@ -398,7 +392,6 @@ class QwenVLM(BaseVLM):
         next_token_logits = None
         # Define how many tokens to generate (needs to be > 1 potentially)
         try:
-            # *** CORRECTION HERE: Use **inputs unpacking ***
             outputs = self.model.generate(
                 **inputs,                           # Pass all processed inputs
                 max_new_tokens=1,
@@ -433,8 +426,6 @@ class QwenVLM(BaseVLM):
              raise RuntimeError("Logit retrieval failed (next_token_logits is None after generate). Check warnings above.")
 
         # --- Calculate Probabilities for Choices ---
-        # (Rest of the logic remains the same: filter valid tokens, softmax, map to choices)
-        # ...
         result_probs = {}
         valid_choice_token_ids_in_vocab = [tid for tid in choice_token_ids if tid >= 0 and tid < next_token_logits.shape[0]]
         if len(valid_choice_token_ids_in_vocab) != len(choice_token_ids):

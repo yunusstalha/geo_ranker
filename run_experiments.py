@@ -1,20 +1,18 @@
-# run_experiments.py
-
 import argparse
 import json
 import os
 import time
 from PIL import Image
-from tqdm import tqdm # For progress bars
-import traceback # For detailed error logging
-import numpy as np # For likert calculations
+from tqdm import tqdm 
+import traceback 
+import numpy as np 
 
 # Import VLM classes and prompt builders
 from models import QwenVLM, LlavaVLM
 # Use the getter function which now handles modes correctly
 from prompts.prompt_templates import get_prompt_builder
 
-# --- Helper Function for Safe JSON Parsing (Keep for existing modes) ---
+# --- Helper Function for Safe JSON Parsing ---
 def parse_vlm_output(output_text, expected_keys):
     """
     Tries to parse VLM output as JSON. Returns parsed dict or raw text.
@@ -43,8 +41,7 @@ def parse_vlm_output(output_text, expected_keys):
              if isinstance(parsed, dict) and all(key in parsed for key in expected_keys):
                  return parsed # Return parsed dict
              else:
-                 # Don't print warning here to avoid clutter, let caller handle
-                 # print(f"\nWarning: Parsed JSON missing expected keys ({expected_keys}). Raw output snippet: {output_text[:50]}...")
+                 # print(f"\nWarning: Parsed JSON missing expected keys ({expected_keys}). Raw: {json_str[:100]}...")
                  return output_text # Return raw text if keys mismatch
         else:
             # No JSON object structure found
@@ -54,16 +51,16 @@ def parse_vlm_output(output_text, expected_keys):
         # print(f"\nWarning: Failed to parse JSON. Raw output snippet: {output_text[:50]}...")
         return output_text # Return raw text on parse failure
     except Exception as e:
-        print(f"\nWarning: Unexpected error parsing output: {e}. Raw output snippet: {output_text[:50]}...")
+        print(f"\nWarning: Unexpected error parsing output: {e}. Raw: {output_text[:100]}...")
         return output_text
 
-# --- Helper Function for VLM Standard Generation Call (Keep for existing modes) ---
+# --- Helper Function for VLM Standard Generation Call ---
 def run_vlm_generate(vlm_instance, conversation, images, max_tokens):
     """ Calls VLM generate with error handling. Returns output string or error string. """
-    # ... (Keep existing implementation, maybe add more specific error logging) ...
     try:
         if not images or any(img is None for img in images):
              raise ValueError("Invalid or missing image object provided.")
+        # Assuming VLM classes have @torch.no_grad() decorator on _generate_hf
         output_text = vlm_instance.generate(
             conversation=conversation, image_inputs=images, max_new_tokens=max_tokens
         )
@@ -91,10 +88,10 @@ def run_vlm_generate(vlm_instance, conversation, images, max_tokens):
 # --- Helper Function for VLM Score Multiple Choice Call ---
 def run_vlm_score_mc(vlm_instance, conversation, images, choices):
     """ Calls VLM score_multiple_choice with error handling. Returns dict of probs or dict with error."""
-    # ... (Keep existing implementation) ...
     try:
         if not images or any(img is None for img in images):
              raise ValueError("Invalid or missing image object provided.")
+        # Assumes score_multiple_choice already has @torch.no_grad()
         choice_probs = vlm_instance.score_multiple_choice(
             conversation=conversation, image_inputs=images, choices=choices
         )
@@ -118,7 +115,7 @@ def run_vlm_score_mc(vlm_instance, conversation, images, choices):
 def main(args):
     print("--- Starting Experiment Run ---")
     print(f"Input JSON: {args.input_json}")
-    print(f"Output JSON: {args.output_json}") # Shows the constructed output path
+    print(f"Output JSON: {args.output_json}")
     print(f"VLM: {args.vlm}, Backend: {args.inference_backend}")
     # Update experiments printout
     exp_flags = []
@@ -126,13 +123,13 @@ def main(args):
     if args.run_pointwise_reasoning: exp_flags.append("PW_Reasoning")
     if args.run_pointwise_yesno: exp_flags.append("PW_YesNo")
     if args.run_pointwise_likert: exp_flags.append("PW_Likert")
-    if args.run_pointwise_reasoning_yesno: exp_flags.append("PW_ReasonYesNo") # Added
-    if args.run_pairwise: exp_flags.append("Pairwise")
+    if args.run_pointwise_reasoning_yesno: exp_flags.append("PW_ReasonYesNo")
+    if args.run_pairwise_basic: exp_flags.append("PairwiseBasic")
+    if args.run_pairwise_reasoning: exp_flags.append("PairwiseReasoning2Pass")
     print(f"Experiments: {', '.join(exp_flags)}")
     print(f"Saving results after each query to: {args.output_json}")
 
     # --- Load Input Data ---
-    # ... (Keep existing implementation) ...
     try:
         with open(args.input_json, 'r') as f:
             input_data = json.load(f)
@@ -145,14 +142,14 @@ def main(args):
         return
 
     # --- Initialize VLM ---
-    # ... (Keep existing implementation, max_images logic seems ok) ...
     vlm_class = QwenVLM if args.vlm == "qwen" else LlavaVLM
     default_model = "Qwen/Qwen2.5-VL-7B-Instruct" if args.vlm == "qwen" else "llava-hf/llava-1.5-7b-hf"
     model_name_to_load = args.model_name if args.model_name else default_model
     try:
         print(f"\nInitializing VLM: {model_name_to_load}...")
         max_images = 2
-        if args.run_pairwise: max_images = 3
+        if args.run_pairwise_basic or args.run_pairwise_reasoning: # Check args directly
+             max_images = 3
         vlm_instance = vlm_class(
             model_name=model_name_to_load, device=args.device, use_quantization=args.use_quantization,
             inference_backend=args.inference_backend, tensor_parallel_size=args.tensor_parallel_size,
@@ -165,18 +162,16 @@ def main(args):
         return
 
     # --- Prepare Prompt Builders ---
-    # Get main builder functions once
     builder_pointwise = None
     builder_pairwise = None
     try:
         if any([args.run_pointwise_basic, args.run_pointwise_reasoning,
                 args.run_pointwise_yesno, args.run_pointwise_likert,
-                args.run_pointwise_reasoning_yesno]): # Added new flag
-             # The builder function is the same, the 'mode' argument changes behavior
-             builder_pointwise = get_prompt_builder(args.vlm, 'pointwise', 'basic') # Mode here doesn't matter for getting the function
+                args.run_pointwise_reasoning_yesno]):
+             builder_pointwise = get_prompt_builder(args.vlm, 'pointwise') # Get base pointwise builder
 
-        if args.run_pairwise:
-             builder_pairwise = get_prompt_builder(args.vlm, 'pairwise', 'basic')
+        if args.run_pairwise_basic or args.run_pairwise_reasoning:
+            builder_pairwise = get_prompt_builder(args.vlm, 'pairwise') # Get base pairwise builder
 
     except ValueError as e:
         print(f"FATAL: Error getting prompt builders: {e}")
@@ -187,7 +182,6 @@ def main(args):
     start_run_time = time.time()
 
     # Output file handling
-    # ... (Keep existing implementation) ...
     if os.path.exists(args.output_json) and args.overwrite_output:
          print(f"Warning: Output file {args.output_json} exists and will be overwritten.")
     elif os.path.exists(args.output_json) and not args.overwrite_output:
@@ -206,203 +200,345 @@ def main(args):
         query_img_obj = None
 
         # --- Load Query Image ---
-        # ... (Keep existing implementation) ...
         try:
             query_img_obj = vlm_instance.load_image(query_path)
         except Exception as e:
             print(f"\nError loading query image {query_path} for item {item_index}: {e}")
             result_item["query_error"] = f"Failed to load query image: {e}"
             results_data.append(result_item)
-            # Save and continue logic
-            try:
+            try: # Try to save partial results
                 with open(args.output_json, 'w') as f: json.dump(results_data, f, indent=4, default=str)
             except Exception as save_e: print(f"\nError saving results after query image load failure: {save_e}")
-            continue
+            continue # Skip to next query item
 
         # --- Initialize results lists for this query item ---
         if args.run_pointwise_basic: result_item['pointwise_basic_results'] = []
         if args.run_pointwise_reasoning: result_item['pointwise_reasoning_results'] = []
         if args.run_pointwise_yesno: result_item['pointwise_yesno_results'] = []
         if args.run_pointwise_likert: result_item['pointwise_likert_results'] = []
-        if args.run_pointwise_reasoning_yesno: result_item['pointwise_reasoning_yesno_results'] = [] # Added
+        if args.run_pointwise_reasoning_yesno: result_item['pointwise_reasoning_yesno_results'] = []
+        # Initialize pairwise keys based on args
+        if args.run_pairwise_basic:
+            result_item['pairwise_basic_comparisons'] = []
+            result_item['pairwise_basic_ranking'] = []
+        if args.run_pairwise_reasoning:
+            result_item['pairwise_reasoning_comparisons'] = []
+            result_item['pairwise_reasoning_ranking'] = []
+
+        # Determine if any pairwise mode is active for the loop later
+        run_pairwise_active = args.run_pairwise_basic or args.run_pairwise_reasoning
 
         # --- Loop through Candidate Predictions for Pointwise Modes ---
-        for cand_idx, cand_path in enumerate(tqdm(predictions, desc=f"Query {item_index+1} Cands", leave=False)):
-            cand_img = None
-            # Append error placeholder function
-            def append_error(mode_key, error_msg="Image Load Error"):
-                 if mode_key in result_item:
-                      result_item[mode_key].append({"error": error_msg})
+        # This loop populates the pointwise results if flags are set
+        if any([args.run_pointwise_basic, args.run_pointwise_reasoning,
+                args.run_pointwise_yesno, args.run_pointwise_likert,
+                args.run_pointwise_reasoning_yesno]):
 
-            try:
-                cand_img = vlm_instance.load_image(cand_path)
-            except Exception as e:
-                print(f"\nError loading candidate image {cand_path} (Cand {cand_idx}): {e}")
-                # Add error placeholders to all active pointwise modes
-                if args.run_pointwise_basic: append_error('pointwise_basic_results')
-                if args.run_pointwise_reasoning: append_error('pointwise_reasoning_results')
-                if args.run_pointwise_yesno: append_error('pointwise_yesno_results')
-                if args.run_pointwise_likert: append_error('pointwise_likert_results')
-                if args.run_pointwise_reasoning_yesno: append_error('pointwise_reasoning_yesno_results') # Added
-                continue # Skip this candidate
+            for cand_idx, cand_path in enumerate(tqdm(predictions, desc=f"Query {item_index+1} PW Cands", leave=False)):
+                cand_img = None
+                # Append error placeholder function
+                def append_error(mode_key, error_msg="Image Load Error"):
+                     if mode_key in result_item:
+                          result_item[mode_key].append({"error": error_msg})
 
-            # --- Pointwise Basic ---
-            if args.run_pointwise_basic and builder_pointwise:
-                # ... (Keep existing implementation) ...
-                conversation = builder_pointwise(mode='basic')
-                output_text = run_vlm_generate(vlm_instance, conversation, [query_img_obj, cand_img], args.max_new_tokens)
-                parsed = parse_vlm_output(output_text, expected_keys=['score'])
-                result_item['pointwise_basic_results'].append(parsed if isinstance(parsed, dict) else {"raw_output": output_text, "error": "Parsing failed or keys missing"})
+                try:
+                    cand_img = vlm_instance.load_image(cand_path)
+                    pointwise_images = [query_img_obj, cand_img] # Images needed for pointwise
+                except Exception as e:
+                    print(f"\nError loading candidate image {cand_path} (Cand {cand_idx}) for Pointwise: {e}")
+                    # Add error placeholders to all active pointwise modes
+                    if args.run_pointwise_basic: append_error('pointwise_basic_results')
+                    if args.run_pointwise_reasoning: append_error('pointwise_reasoning_results')
+                    if args.run_pointwise_yesno: append_error('pointwise_yesno_results')
+                    if args.run_pointwise_likert: append_error('pointwise_likert_results')
+                    if args.run_pointwise_reasoning_yesno: append_error('pointwise_reasoning_yesno_results')
+                    continue # Skip this candidate for pointwise
 
+                # --- Pointwise Basic ---
+                if args.run_pointwise_basic and builder_pointwise:
+                    conversation = builder_pointwise(mode='basic')
+                    output_text = run_vlm_generate(vlm_instance, conversation, pointwise_images, args.max_new_tokens)
+                    parsed = parse_vlm_output(output_text, expected_keys=['score'])
+                    result_item['pointwise_basic_results'].append(parsed if isinstance(parsed, dict) else {"raw_output": output_text, "error": "Parsing failed or keys missing"})
 
-            # --- Pointwise Reasoning ---
-            if args.run_pointwise_reasoning and builder_pointwise:
-                # ... (Keep existing implementation) ...
-                 conversation = builder_pointwise(mode='reasoning')
-                 output_text = run_vlm_generate(vlm_instance, conversation, [query_img_obj, cand_img], args.max_new_tokens)
-                 parsed = parse_vlm_output(output_text, expected_keys=['score', 'reasoning'])
-                 result_item['pointwise_reasoning_results'].append(parsed if isinstance(parsed, dict) else {"raw_output": output_text, "error": "Parsing failed or keys missing"})
+                # --- Pointwise Reasoning (Single Pass) ---
+                if args.run_pointwise_reasoning and builder_pointwise:
+                     conversation = builder_pointwise(mode='reasoning')
+                     output_text = run_vlm_generate(vlm_instance, conversation, pointwise_images, args.max_new_tokens)
+                     parsed = parse_vlm_output(output_text, expected_keys=['score', 'reasoning'])
+                     result_item['pointwise_reasoning_results'].append(parsed if isinstance(parsed, dict) else {"raw_output": output_text, "error": "Parsing failed or keys missing"})
 
+                # --- Pointwise Yes/No ---
+                if args.run_pointwise_yesno and builder_pointwise:
+                    # Requires HF backend, checked at arg parsing
+                    yesno_choices = ["Yes", "No"]
+                    conversation = builder_pointwise(mode='yesno')
+                    choice_probs = run_vlm_score_mc(vlm_instance, conversation, pointwise_images, yesno_choices)
+                    score = None
+                    error_msg = choice_probs.get("error")
+                    if not error_msg:
+                        prob_yes = choice_probs.get("Yes", 0.0)
+                        prob_no = choice_probs.get("No", 0.0)
+                        denominator = prob_yes + prob_no
+                        if denominator > 1e-9: score = (prob_yes / denominator) * 100
+                        else: score = 50.0 # Undecided
+                    result_item['pointwise_yesno_results'].append({
+                        "probabilities": choice_probs,
+                        "calculated_score": score if not error_msg else None,
+                        "error": error_msg
+                    })
 
-            # --- Pointwise Yes/No ---
-            if args.run_pointwise_yesno and builder_pointwise:
-                # ... (Keep existing implementation) ...
-                yesno_choices = ["Yes", "No"]
-                conversation = builder_pointwise(mode='yesno')
-                choice_probs = run_vlm_score_mc(vlm_instance, conversation, [query_img_obj, cand_img], yesno_choices)
-                score = None
-                error_msg = choice_probs.get("error")
-                if not error_msg:
-                    prob_yes = choice_probs.get("Yes", 0.0)
-                    prob_no = choice_probs.get("No", 0.0)
-                    denominator = prob_yes + prob_no
-                    if denominator > 1e-9: score = (prob_yes / denominator) * 100
-                    else: score = 50.0
-                result_item['pointwise_yesno_results'].append({
-                    "probabilities": choice_probs,
-                    "calculated_score": score if not error_msg else None,
-                    "error": error_msg # Store potential error from scoring call
-                })
+                # --- Pointwise Likert ---
+                if args.run_pointwise_likert and builder_pointwise:
+                    # Requires HF backend, checked at arg parsing
+                    likert_choices = ["1", "2", "3", "4", "5"]
+                    conversation = builder_pointwise(mode='likert')
+                    choice_probs = run_vlm_score_mc(vlm_instance, conversation, pointwise_images, likert_choices)
+                    score = None
+                    expected_value = None
+                    error_msg = choice_probs.get("error")
+                    if not error_msg:
+                        ev_sum, prob_sum = 0.0, 0.0
+                        for i_str in likert_choices:
+                            prob = choice_probs.get(i_str, 0.0)
+                            ev_sum += prob * int(i_str)
+                            prob_sum += prob
+                        if prob_sum > 1e-9: expected_value = ev_sum / prob_sum
+                        else: expected_value = 3.0 # Midpoint if no probability mass
+                        score = (expected_value - 1) * 25 # Scale 1-5 to 0-100
+                    result_item['pointwise_likert_results'].append({
+                        "probabilities": choice_probs,
+                        "expected_value": expected_value if not error_msg else None,
+                        "calculated_score": score if not error_msg else None,
+                        "error": error_msg
+                    })
 
-            # --- Pointwise Likert ---
-            if args.run_pointwise_likert and builder_pointwise:
-                # ... (Keep existing implementation) ...
-                likert_choices = ["1", "2", "3", "4", "5"]
-                conversation = builder_pointwise(mode='likert')
-                choice_probs = run_vlm_score_mc(vlm_instance, conversation, [query_img_obj, cand_img], likert_choices)
-                score = None
-                expected_value = None
-                error_msg = choice_probs.get("error")
-                if not error_msg:
-                    ev_sum, prob_sum = 0.0, 0.0
-                    for i_str in likert_choices:
-                        prob = choice_probs.get(i_str, 0.0)
-                        ev_sum += prob * int(i_str)
-                        prob_sum += prob
-                    if prob_sum > 1e-9: expected_value = ev_sum / prob_sum
-                    else: expected_value = 3.0
-                    score = (expected_value - 1) * 25
-                result_item['pointwise_likert_results'].append({
-                    "probabilities": choice_probs,
-                    "expected_value": expected_value if not error_msg else None,
-                    "calculated_score": score if not error_msg else None,
-                    "error": error_msg
-                })
+                # --- Pointwise Reasoning + Yes/No (Two-Pass) ---
+                if args.run_pointwise_reasoning_yesno and builder_pointwise:
+                     # Requires HF backend, checked at arg parsing
+                     reasoning_text = "[Error in Pass 1]"
+                     choice_probs = {"error": "Pass 1 Failed"}
+                     score = None
+                     error_msg_pass1 = None
+                     error_msg_pass2 = None
 
-            # --- Pointwise Reasoning + Yes/No (Two-Pass) --- Added Block ---
-            if args.run_pointwise_reasoning_yesno and builder_pointwise:
-                 reasoning_text = "[Error in Pass 1]"
-                 choice_probs = {"error": "Pass 1 Failed"}
-                 score = None
-                 error_msg_pass1 = None
-                 error_msg_pass2 = None
-
-                 # Pass 1: Generate Reasoning
-                 try:
-                     conv_pass1 = builder_pointwise(mode='reasoning_only')
-                     reasoning_text = run_vlm_generate(vlm_instance, conv_pass1, [query_img_obj, cand_img], args.max_reasoning_tokens)
-                     # Check if generate helper returned an error string
-                     if reasoning_text.startswith("[VLM"):
-                          error_msg_pass1 = reasoning_text
-                          reasoning_text = error_msg_pass1 # Store error in reasoning field
-                 except Exception as e1:
-                     error_msg_pass1 = f"[Pass 1 Exception: {type(e1).__name__}]"
-                     print(f"\n{error_msg_pass1} for cand {cand_idx}")
-                     traceback.print_exc()
-                     reasoning_text = error_msg_pass1
-
-                 # Pass 2: Get Yes/No Score (only if Pass 1 didn't error)
-                 if error_msg_pass1 is None:
+                     # Pass 1: Generate Reasoning
                      try:
-                         yesno_choices = ["Yes", "No"]
-                         conv_pass2 = builder_pointwise(mode='yesno_from_reasoning', reasoning_text=reasoning_text)
-                         choice_probs = run_vlm_score_mc(vlm_instance, conv_pass2, [query_img_obj, cand_img], yesno_choices)
-                         error_msg_pass2 = choice_probs.get("error") # Check for error from helper
+                         conv_pass1 = builder_pointwise(mode='reasoning_only')
+                         reasoning_text = run_vlm_generate(vlm_instance, conv_pass1, pointwise_images, args.max_reasoning_tokens)
+                         if reasoning_text.startswith("[VLM"):
+                              error_msg_pass1 = reasoning_text
+                              reasoning_text = None # Prevent Pass 2
+                     except Exception as e1:
+                         error_msg_pass1 = f"[Pass 1 Exception: {type(e1).__name__}]"
+                         print(f"\n{error_msg_pass1} for PW cand {cand_idx}")
+                         # traceback.print_exc()
+                         reasoning_text = None # Prevent Pass 2
 
-                         if not error_msg_pass2:
-                             prob_yes = choice_probs.get("Yes", 0.0)
-                             prob_no = choice_probs.get("No", 0.0)
-                             denominator = prob_yes + prob_no
-                             if denominator > 1e-9: score = (prob_yes / denominator) * 100
-                             else: score = 50.0 # Undecided
-                     except Exception as e2:
-                          error_msg_pass2 = f"[Pass 2 Exception: {type(e2).__name__}]"
-                          print(f"\n{error_msg_pass2} for cand {cand_idx}")
-                          traceback.print_exc()
-                          choice_probs = {"error": error_msg_pass2} # Ensure error is stored
+                     # Pass 2: Get Yes/No Score (only if Pass 1 didn't error)
+                     if reasoning_text is not None:
+                         try:
+                             yesno_choices = ["Yes", "No"]
+                             conv_pass2 = builder_pointwise(mode='yesno_from_reasoning', reasoning_text=reasoning_text)
+                             choice_probs = run_vlm_score_mc(vlm_instance, conv_pass2, pointwise_images, yesno_choices)
+                             error_msg_pass2 = choice_probs.get("error")
+                             if not error_msg_pass2:
+                                 prob_yes = choice_probs.get("Yes", 0.0)
+                                 prob_no = choice_probs.get("No", 0.0)
+                                 denominator = prob_yes + prob_no
+                                 if denominator > 1e-9: score = (prob_yes / denominator) * 100
+                                 else: score = 50.0 # Undecided
+                         except Exception as e2:
+                              error_msg_pass2 = f"[Pass 2 Exception: {type(e2).__name__}]"
+                              print(f"\n{error_msg_pass2} for PW cand {cand_idx}")
+                              # traceback.print_exc()
+                              choice_probs = {"error": error_msg_pass2}
+
+                     # Store combined results for this candidate
+                     result_item['pointwise_reasoning_yesno_results'].append({
+                         "reasoning": reasoning_text if error_msg_pass1 is None else error_msg_pass1,
+                         "probabilities": choice_probs,
+                         "calculated_score": score if not error_msg_pass1 and not error_msg_pass2 else None,
+                         "error": error_msg_pass1 or error_msg_pass2
+                     })
+
+                # Clean up candidate image from memory
+                del cand_img
 
 
-                 # Store combined results for this candidate
-                 result_item['pointwise_reasoning_yesno_results'].append({
-                     "reasoning": reasoning_text, # Contains reasoning or Pass 1 error
-                     "probabilities": choice_probs, # Contains probs or Pass 2 error
-                     "calculated_score": score if not error_msg_pass1 and not error_msg_pass2 else None,
-                     "error": error_msg_pass1 or error_msg_pass2 # Combine errors if any
-                 })
-            # --- End of Pointwise Reasoning + Yes/No Block ---
+        # PAIRWISE SECTION
+        if run_pairwise_active and builder_pairwise:
+            # Determine the specific mode ('basic' or 'reasoning') based on args
+            run_pairwise_mode_type = 'basic' if args.run_pairwise_basic else 'reasoning'
+            pairwise_mode_label = "Basic" if run_pairwise_mode_type == 'basic' else "Reasoning (2-Pass)"
+            print(f"\n-- Running Pairwise Sorting (Mode: {pairwise_mode_label}, Top K: {args.pairwise_top_k}) --")
 
-        # --- Pairwise Top-1 (after candidate loop) ---
-        if args.run_pairwise and builder_pairwise:
-            pairwise_top1_prediction = "[Not Enough Predictions]"
-            pairwise_comparisons = []
-            if len(predictions) > 0:
-                current_best_path = predictions[0]
-                if len(predictions) == 1: pairwise_top1_prediction = current_best_path
-                else:
-                    for i in tqdm(range(1, len(predictions)), desc=f"Query {item_index+1} Pairwise", leave=False):
-                        candidate_path_1 = current_best_path
-                        candidate_path_2 = predictions[i]
-                        cand1_img, cand2_img = None, None
-                        comp_result = {"cand1": candidate_path_1, "cand2": candidate_path_2}
-                        try:
-                            cand1_img = vlm_instance.load_image(candidate_path_1)
-                            cand2_img = vlm_instance.load_image(candidate_path_2)
-                        except Exception as e:
-                            comp_result["error"] = "Image Load Error"
-                            pairwise_comparisons.append(comp_result); continue
-                        conversation = builder_pairwise(mode='basic')
-                        output_text = run_vlm_generate(vlm_instance, conversation, [query_img_obj, cand1_img, cand2_img], args.max_new_tokens)
-                        parsed = parse_vlm_output(output_text, expected_keys=['preference'])
-                        comp_result["raw_output"] = output_text
-                        if isinstance(parsed, dict):
-                            preference = parsed.get('preference')
-                            comp_result["parsed_preference"] = preference
+            # Work on a copy of predictions to sort in place for this item
+            candidate_paths = list(predictions) # Use the original list
+            num_candidates = len(candidate_paths)
+            comparisons_log = [] # Log individual comparisons
+
+            # Selection Sort for Top-K
+            k = min(args.pairwise_top_k, num_candidates)
+            for i in range(k):
+                current_best_index = i
+                # Compare candidate[i] with subsequent candidates
+                for j in range(i + 1, num_candidates):
+                    cand1_path = candidate_paths[current_best_index]
+                    cand2_path = candidate_paths[j]
+                    cand1_img, cand2_img = None, None
+
+                    # Initialize comparison entry
+                    comparison_entry = {
+                        "comparison_index": len(comparisons_log),
+                        "cand1_path": cand1_path,
+                        "cand2_path": cand2_path,
+                        "current_best_before_swap": candidate_paths[i],
+                        "winner_index_in_comparison": 1, # Default assumption
+                        "reasoning": None, # For reasoning mode
+                        "preference": None, # Final preference
+                        # "confidence": None, # REMOVED
+                        "pass1_raw_output": None,
+                        "pass2_raw_output": None, # Only used in 2-pass reasoning
+                        "error_pass1": None,
+                        "error_pass2": None, # Only used in 2-pass reasoning
+                        "combined_error": None
+                    }
+
+                    try:
+                        # --- Load Images ---
+                        cand1_img = vlm_instance.load_image(cand1_path)
+                        cand2_img = vlm_instance.load_image(cand2_path)
+                        images_for_vlm = [query_img_obj, cand1_img, cand2_img]
+
+                        # --- Execute VLM Call(s) based on mode ---
+                        if run_pairwise_mode_type == 'basic':
+                            # --- Basic Mode (Single Pass) ---
+                            conv_pass1 = builder_pairwise(mode='basic')
+                            output_pass1 = run_vlm_generate(
+                                vlm_instance, conv_pass1, images_for_vlm, args.max_new_tokens
+                            )
+                            comparison_entry["pass1_raw_output"] = output_pass1
+
+                            if output_pass1.startswith("[VLM"): # Check for generate error
+                                comparison_entry["error_pass1"] = output_pass1
+                            else:
+                                parsed = parse_vlm_output(output_pass1, expected_keys=['preference']) # Only expect preference
+                                if isinstance(parsed, dict):
+                                    preference = parsed.get('preference')
+                                    comparison_entry["preference"] = preference
+                                    try:
+                                        if int(preference) == 2:
+                                            current_best_index = j
+                                            comparison_entry["winner_index_in_comparison"] = 2
+                                    except (ValueError, TypeError):
+                                        comparison_entry["error_pass1"] = "Invalid preference value in JSON (Basic)"
+                                else:
+                                    comparison_entry["error_pass1"] = "Parsing failed or keys missing (Basic)"
+                                    # comparison_entry["pass1_raw_output"] = parsed # Already stored raw output
+
+                        elif run_pairwise_mode_type == 'reasoning':
+                            # --- Reasoning Mode (Two Pass - No Confidence) ---
+                            reasoning_text = None
+                            preference = None
+
+                            # --- Pass 1: Generate Reasoning ---
                             try:
-                                pref_int = int(preference)
-                                if pref_int == 2: current_best_path = candidate_path_2
-                            except (ValueError, TypeError): comp_result["parsing_error"] = "Invalid preference value"
-                        else: comp_result["parsing_error"] = "Failed to parse JSON"
-                        comp_result["winner_after_comp"] = current_best_path
-                        pairwise_comparisons.append(comp_result)
-                    pairwise_top1_prediction = current_best_path
-            result_item['pairwise_comparisons'] = pairwise_comparisons
-            result_item['pairwise_top1_prediction'] = pairwise_top1_prediction
+                                conv_pass1 = builder_pairwise(mode='reasoning_only')
+                                reasoning_text = run_vlm_generate(
+                                    vlm_instance, conv_pass1, images_for_vlm, args.max_reasoning_tokens
+                                )
+                                comparison_entry["pass1_raw_output"] = reasoning_text
+                                comparison_entry["reasoning"] = reasoning_text # Store reasoning
+
+                                if reasoning_text.startswith("[VLM"): # Check helper error
+                                    comparison_entry["error_pass1"] = reasoning_text
+                                    reasoning_text = None # Prevent Pass 2
+
+                            except Exception as e1_pairwise:
+                                err_msg = f"[Pass 1 VLM Error: {type(e1_pairwise).__name__}]"
+                                print(f"\n{err_msg} for comparison {len(comparisons_log)}")
+                                # traceback.print_exc()
+                                comparison_entry["error_pass1"] = err_msg
+                                reasoning_text = None # Prevent Pass 2
+
+                            # --- Pass 2: Get Preference from Reasoning ---
+                            if reasoning_text is not None and not comparison_entry["error_pass1"]: # Only run if Pass 1 succeeded
+                                try:
+                                    conv_pass2 = builder_pairwise(mode='preference_from_reasoning', reasoning_text=reasoning_text)
+                                    output_pass2 = run_vlm_generate(
+                                        vlm_instance, conv_pass2, images_for_vlm, args.max_new_tokens
+                                    )
+                                    comparison_entry["pass2_raw_output"] = output_pass2
+
+                                    if output_pass2.startswith("[VLM"): # Check helper error
+                                        comparison_entry["error_pass2"] = output_pass2
+                                    else:
+                                        # MODIFIED: Only expect 'preference'
+                                        parsed = parse_vlm_output(output_pass2, expected_keys=['preference'])
+                                        if isinstance(parsed, dict):
+                                            preference = parsed.get('preference')
+                                            comparison_entry["preference"] = preference
+                                            # comparison_entry["confidence"] = parsed.get('confidence') # REMOVED
+                                            try:
+                                                if int(preference) == 2:
+                                                    current_best_index = j
+                                                    comparison_entry["winner_index_in_comparison"] = 2
+                                            except (ValueError, TypeError):
+                                                comparison_entry["error_pass2"] = "Invalid preference value in JSON (Pass 2)"
+                                        else:
+                                            comparison_entry["error_pass2"] = "Parsing failed or key missing (Pass 2)"
+                                            # comparison_entry["pass2_raw_output"] = parsed # Already stored raw
+
+                                except Exception as e2_pairwise:
+                                     err_msg = f"[Pass 2 VLM Error: {type(e2_pairwise).__name__}]"
+                                     print(f"\n{err_msg} for comparison {len(comparisons_log)}")
+                                     # traceback.print_exc()
+                                     comparison_entry["error_pass2"] = err_msg
+
+                    except Exception as img_load_err:
+                        # Catch errors during image loading
+                        err_msg = f"Error loading images for pairwise comparison: {type(img_load_err).__name__}"
+                        print(f"\n{err_msg}")
+                        comparison_entry["combined_error"] = err_msg
+                        # Assume cand1 wins if images can't be loaded for comparison
+
+                    finally:
+                        # Combine errors and clean up
+                        comparison_entry["combined_error"] = comparison_entry["error_pass1"] or comparison_entry["error_pass2"] or comparison_entry["combined_error"]
+                        # Clean up individual error fields if desired, or keep for debugging
+                        # if comparison_entry["combined_error"]:
+                        #     if "error_pass1" in comparison_entry: del comparison_entry["error_pass1"]
+                        #     if "error_pass2" in comparison_entry: del comparison_entry["error_pass2"]
+
+                        del cand1_img, cand2_img # Free memory
+                        comparisons_log.append(comparison_entry)
+                        # time.sleep(0.1) # Optional delay
+
+                # --- End of inner comparison loop (j) ---
+
+                # After comparing candidate[i] with all subsequent ones, swap the best found into position i
+                if current_best_index != i:
+                    candidate_paths[i], candidate_paths[current_best_index] = candidate_paths[current_best_index], candidate_paths[i]
+
+            # --- End of outer sorting loop (i) ---
+
+            # Store results for the correct mode
+            if args.run_pairwise_basic:
+                 result_item['pairwise_basic_comparisons'] = comparisons_log
+                 result_item['pairwise_basic_ranking'] = candidate_paths[:k]
+            elif args.run_pairwise_reasoning: # This flag now implies 2-pass
+                 result_item['pairwise_reasoning_comparisons'] = comparisons_log
+                 result_item['pairwise_reasoning_ranking'] = candidate_paths[:k]
+
+        # <<< --- PAIRWISE SECTION END --- >>>
 
 
         # --- Append result for this query and SAVE ---
         results_data.append(result_item)
         try:
             with open(args.output_json, 'w') as f:
+                 # Use default=str to handle potential non-serializable types like numpy floats
                  json.dump(results_data, f, indent=4, default=str)
         except Exception as e:
             print(f"\nError saving results to {args.output_json} after processing query {item_index}: {e}")
@@ -411,7 +547,7 @@ def main(args):
     # --- Final Summary ---
     end_run_time = time.time()
     print("-" * 30)
-    print(f"Finished processing {len(results_data)} queries.")
+    print(f"Finished processing {len(results_data)} / {len(input_data)} queries.")
     print(f"Total runtime: {end_run_time - start_run_time:.2f} seconds.")
     print(f"Final results saved to {args.output_json}")
     print("--- Experiment Run Complete ---")
@@ -434,20 +570,22 @@ if __name__ == "__main__":
     parser.add_argument("--model_name", type=str, default=None, help="Override default VLM model name.")
     parser.add_argument("--inference_backend", type=str, default="hf", choices=["hf", "vllm"], help="Inference backend.")
     parser.add_argument("--use_quantization", action='store_true', help="Enable quantization.")
-    parser.add_argument("--device", type=str, default="auto", help="Device for HF backend.")
+    parser.add_argument("--device", type=str, default="auto", help="Device for HF backend ('auto', 'cuda', 'cpu').")
     parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Tensor parallel size for vLLM.")
 
     # --- Experiment Selection ---
     parser.add_argument("--run_pointwise_basic", action='store_true', help="Run Pointwise Basic scoring.")
-    parser.add_argument("--run_pointwise_reasoning", action='store_true', help="Run Pointwise Reasoning scoring.")
+    parser.add_argument("--run_pointwise_reasoning", action='store_true', help="Run Pointwise Reasoning scoring (1-Pass).")
     parser.add_argument("--run_pointwise_yesno", action='store_true', help="Run Pointwise Yes/No scoring (HF only).")
     parser.add_argument("--run_pointwise_likert", action='store_true', help="Run Pointwise Likert scoring (HF only).")
-    parser.add_argument("--run_pointwise_reasoning_yesno", action='store_true', help="Run 2-Pass Pointwise: Reasoning -> Yes/No score (HF only).") # Added
-    parser.add_argument("--run_pairwise", action='store_true', help="Run Pairwise Top-1 reranking.")
+    parser.add_argument("--run_pointwise_reasoning_yesno", action='store_true', help="Run 2-Pass Pointwise: Reasoning -> Yes/No score (HF only).")
+    parser.add_argument("--run_pairwise_basic", action='store_true', help="Run Pairwise reranking (Basic Preference, 1-Pass).")
+    parser.add_argument("--run_pairwise_reasoning", action='store_true', help="Run Pairwise reranking (Reasoning -> Preference, 2-Pass).") # Updated help
+    parser.add_argument("--pairwise_top_k", type=int, default=3, help="Number of top candidates to find using pairwise sorting.")
 
     # --- Generation Params ---
-    parser.add_argument("--max_new_tokens", type=int, default=128, help="Max new tokens for JSON/text generation.")
-    parser.add_argument("--max_reasoning_tokens", type=int, default=256, help="Max new tokens for reasoning_only pass (used in 2-pass modes).") # Added
+    parser.add_argument("--max_new_tokens", type=int, default=128, help="Max new tokens for JSON/text generation (Pass 2 for 2-pass).")
+    parser.add_argument("--max_reasoning_tokens", type=int, default=256, help="Max new tokens for reasoning_only pass (Pass 1 for 2-pass modes).")
 
 
     parsed_args = parser.parse_args()
@@ -456,13 +594,13 @@ if __name__ == "__main__":
     experiment_flags = [
         parsed_args.run_pointwise_basic, parsed_args.run_pointwise_reasoning,
         parsed_args.run_pointwise_yesno, parsed_args.run_pointwise_likert,
-        parsed_args.run_pointwise_reasoning_yesno, # Added
-        parsed_args.run_pairwise
+        parsed_args.run_pointwise_reasoning_yesno,
+        parsed_args.run_pairwise_basic, parsed_args.run_pairwise_reasoning,
     ]
     if not any(experiment_flags):
-        parser.error("No experiments selected. Please enable at least one run flag (e.g., --run_pointwise_yesno).")
+        parser.error("No experiments selected. Please enable at least one run flag (e.g., --run_pairwise_reasoning).")
 
-    # Added reasoning_yesno to HF backend check
+    # HF backend check for specific modes
     if (parsed_args.run_pointwise_yesno or parsed_args.run_pointwise_likert or parsed_args.run_pointwise_reasoning_yesno) and parsed_args.inference_backend != 'hf':
          parser.error("--run_pointwise_yesno, --run_pointwise_likert, and --run_pointwise_reasoning_yesno require --inference_backend hf")
 
@@ -470,18 +608,21 @@ if __name__ == "__main__":
     os.makedirs(parsed_args.output_dir, exist_ok=True)
     output_filename_parts = [parsed_args.vlm]
     if parsed_args.model_name:
+         # Sanitize model name for filename
          sanitized_model_name = os.path.basename(parsed_args.model_name).replace('/', '_')
          output_filename_parts.append(sanitized_model_name)
     if parsed_args.exp_name:
          output_filename_parts.append(parsed_args.exp_name)
     else:
+        # Auto-generate name based on active modes
         active_modes = []
         if parsed_args.run_pointwise_basic: active_modes.append("pw_basic")
         if parsed_args.run_pointwise_reasoning: active_modes.append("pw_reason")
         if parsed_args.run_pointwise_yesno: active_modes.append("pw_yesno")
         if parsed_args.run_pointwise_likert: active_modes.append("pw_likert")
-        if parsed_args.run_pointwise_reasoning_yesno: active_modes.append("pw_reason_yesno") # Added
-        if parsed_args.run_pairwise: active_modes.append("pairwise")
+        if parsed_args.run_pointwise_reasoning_yesno: active_modes.append("pw_reason_yesno")
+        if parsed_args.run_pairwise_basic: active_modes.append("pair_basic")
+        if parsed_args.run_pairwise_reasoning: active_modes.append("pair_reason2pass") # Use specific tag
         output_filename_parts.append("_".join(active_modes) if active_modes else "no_modes")
 
     output_filename = "_".join(output_filename_parts) + ".json"

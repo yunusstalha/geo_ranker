@@ -88,8 +88,6 @@ def parse_json_output(output_text):
         try:
             # Clean potential trailing commas before loading
             cleaned_str = json_str.rstrip(',')
-            # Example: Remove trailing comma within last element if needed (more complex regex)
-            # cleaned_str = re.sub(r",\s*(\}|\])$", r"\1", cleaned_str)
             parsed = json.loads(cleaned_str)
             return parsed
         except json.JSONDecodeError as e:
@@ -221,11 +219,11 @@ def main():
             # Single-pass modes
             current_mode = args.prompt_mode
 
-        # === Get Prompt Builder for the Current (or Second Pass) Step ===
+        # Get Prompt Builder for the Current (or Second Pass) Step
         builder_func = get_prompt_builder(args.vlm, args.ranking_strategy, current_mode)
         prompt_conversation = builder_func(mode=current_mode, reasoning_text=reasoning_text_cache)
 
-        # === Execute Generation or Scoring ===
+        #  Execute Generation or Scoring
         if current_mode in ['basic', 'reasoning', 'reasoning_only', 'score_from_reasoning']:
              # These modes use standard generate and expect text/JSON output
              output_text = vlm_instance.generate(
@@ -315,9 +313,6 @@ def main():
     except RuntimeError as e:
         print(f"\nFATAL RUNTIME ERROR: {e}")
         results['error'] = str(e)
-        # Optional: More detailed logging
-        # import traceback
-        # traceback.print_exc()
     except ValueError as e: # Catch prompt builder errors etc.
          print(f"\nFATAL CONFIGURATION ERROR: {e}")
          results['error'] = str(e)
